@@ -5,8 +5,8 @@ const app = express();
 
 app.use(express.json());
 
-const PAGE_ACCESS_TOKEN = "EAAPuaveaDZAIBQ9ZC7UoUXC0L5T30lp2rhr9YneDAz2h3ZAWwUS1xVoPayWWzarcCSdk4ulD6ZCA02WxE2ot3FPUdBBIjzIy0vRfP4F979Ho3MrZAlq5iNSCZCxq3I1t7qKu0BiCcZBu9PDKMdHBpcTBL3omyYBFeYQidkOBbHoL8ARlUlrPqBa6bPuiHGu03jT8A0FMV2K";
-const VERIFY_TOKEN = "mybotverify123";
+const PAGE_ACCESS_TOKEN = "";
+const VERIFY_TOKEN = "";
 const PREFIX = "!";
 
 // ── Commands ──────────────────────────────────────────────────────────────────
