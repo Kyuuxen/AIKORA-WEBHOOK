@@ -109,10 +109,11 @@ async function setPageOnline() {
       await axios.post("https://graph.facebook.com/v19.0/"+process.env.PAGE_ID,{is_always_open:true},{params:{access_token:PAGE_FEED_TOKEN}});
       logger.log("Always open set!","SUCCESS");
     }
-    await axios.post("https://graph.facebook.com/v19.0/me/subscribed_apps",{subscribed_fields:["messages","messaging_postbacks","messaging_optins","message_reads","feed"]},{params:{access_token:PAGE_ACCESS_TOKEN}});
-    logger.log("Subscriptions updated!","SUCCESS");
-  }catch(err){logger.log("setPageOnline: "+(err.response?.data?.error?.message||err.message),"WARN");}
-}
+    await axios.post(
+  "https://graph.facebook.com/v19.0/" + process.env.PAGE_ID + "/subscribed_apps",
+  { subscribed_fields: ["messages","messaging_postbacks","messaging_optins","message_reads","feed"] },
+  { params: { access_token: PAGE_FEED_TOKEN } }
+);
 
 // ── Handle Command ─────────────────────────────────────────────
 const cooldowns=new Map();
