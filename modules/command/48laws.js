@@ -1,0 +1,63 @@
+module.exports.config = {
+  name: "48laws",
+  description: "Random Law of Power",
+  usage: "!48laws or !48laws [1-48]",
+  category: "fun",
+};
+
+const LAWS = [
+  "Never Outshine the Master",
+  "Never Put Too Much Trust in Friends",
+  "Conceal Your Intentions",
+  "Always Say Less than Necessary",
+  "So Much Depends on Reputation — Guard it with your Life",
+  "Court Attention at all Cost",
+  "Get others to do the work for you, but always take the credit",
+  "Make other people come to you — use bait if necessary",
+  "Win through your Actions, Never through Argument",
+  "Avoid the Unhappy and Unlucky",
+  "Learn to keep people Dependent on you",
+  "Use Selective Honesty and Generosity to Disarm your Victim",
+  "When Asking for Help, Appeal to People's Self-Interest",
+  "Pose as a Friend, Work as a Spy",
+  "Crush your Enemy Totally",
+  "Use Absence to Increase Respect and Honor",
+  "Keep Others in Suspended Terror: Cultivate an Air of Unpredictability",
+  "Do not build Fortresses to protect yourself — Isolation is Dangerous",
+  "Know who you're dealing with — do not offend the wrong person",
+  "Do not Commit to Anyone",
+  "Play a Sucker to Catch a Sucker — Seem Dumber than your Mark",
+  "Use the Surrender Tactic: Transform Weakness into Power",
+  "Concentrate your Forces",
+  "Play the Perfect Courtier",
+  "Re-Create Yourself",
+  "Keep your Hands Clean",
+  "Play on People's Need to Believe to Create a Cult-like Following",
+  "Enter Action with Boldness",
+  "Plan all the way to the End",
+  "Make your Accomplishments Seem Effortless",
+  "Control the Options: Get Others to Play with the Cards you Deal",
+  "Play to People's Fantasies",
+  "Discover Each Man's Thumbscrew",
+  "Be Royal in your own Fashion: Act like a King to be treated like one",
+  "Master the Art of Timing",
+  "Disdain Things you cannot have: Ignoring them is the best Revenge",
+  "Create Compelling Spectacles",
+  "Think as you like but Behave like others",
+  "Stir up Waters to Catch Fish",
+  "Despise the Free Lunch",
+  "Avoid Stepping into a Great Man's Shoes",
+  "Strike the Shepherd and the Sheep will Scatter",
+  "Work on the Hearts and Minds of Others",
+  "Disarm and Infuriate with the Mirror Effect",
+  "Preach the Need for Change, but Never Reform too much at once",
+  "Never appear too Perfect",
+  "Do not go Past the Mark you Aimed for; In Victory, Learn when to Stop",
+  "Assume Formlessness",
+];
+
+module.exports.run = async function ({ api, args }) {
+  let num = args[0] ? parseInt(args[0]) : Math.floor(Math.random() * 48) + 1;
+  if (isNaN(num) || num < 1 || num > 48) num = Math.floor(Math.random() * 48) + 1;
+  api.send(`📖 Law #${num} of 48\n━━━━━━━━━━━━━━\n${LAWS[num - 1]}\n\n💡 Type !48laws [1-48] for a specific law`);
+};
