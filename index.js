@@ -246,8 +246,21 @@ async function handleMessage(senderId, text) {
   if (!text) return;
   await markSeen(senderId);
   await showTyping(senderId);
-  if (text.startsWith(PREFIX)) await handleCommand(senderId, text);
-  else await handleAI(senderId, text);
+
+  if (text.startsWith(PREFIX)) {
+    await handleCommand(senderId, text);
+    return;
+  }
+
+  // Check if user is in a random chat — relay message to partner
+  const rcCmd = commands.get("randomchat");
+  if (rcCmd && rcCmd.relay) {
+    const relayed = await rcCmd.relay(senderId, text);
+    if (relayed) return; // message was forwarded, don't send to AI
+  }
+
+  // Not in random chat — respond with AI
+  await handleAI(senderId, text);
 }
 
 const app = express();
