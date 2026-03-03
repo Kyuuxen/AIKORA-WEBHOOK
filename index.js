@@ -32,7 +32,7 @@ if (!PAGE_ACCESS_TOKEN) { console.log("[ERROR] PAGE_ACCESS_TOKEN not set!"); pro
 
 const commands = loadCommands();
 global.commands = commands;
-
+global.sendMessage = sendMessage;
 // ── Memory ────────────────────────────────────────────────────────────────────
 const userMemory = new Map();
 function addMemory(uid, role, text) {
