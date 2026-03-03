@@ -115,17 +115,52 @@ async function askAI(uid, message) {
   const sys = `You are ${BOTNAME}, a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use emojis sometimes. Never say you are Copilot, GPT, or any other AI — you are always ${BOTNAME}.`;
 
   const keyMap = {
-    copilot: "Copilot",
-    gpt5: "GPT-5",
-    aria: "Aria",
-    you: "You.com",
+    copilot:    "Copilot",
+    gpt5:       "GPT-5",
+    aria:       "Aria",
+    you:        "You.com",
     perplexity: "Perplexity",
-    mistral: "Mistral",
+    mistral:    "Mistral",
   };
 
-  const selectedKey = global.aiMode && global.aiMode !== "auto" ? global.aiMode : null;
+  const selectedKey  = global.aiMode && global.aiMode !== "auto" ? global.aiMode : null;
   const selectedName = selectedKey ? keyMap[selectedKey] : null;
 
+  // If a specific model is selected — use ONLY that model, no fallback
+  if (selectedName) {
+    const selected = AI_MODELS.find(m => m.name === selectedName);
+    if (selected) {
+      try {
+        const reply = await selected.call(uid, message, sys);
+        if (reply && reply.trim().length > 0) {
+          logger.log(`AI replied via ${selected.name} (selected)`, "AI");
+          return reply.trim();
+        }
+        // Model returned empty — return null, don't fallback
+        logger.log(`${selected.name} returned empty`, "WARN");
+        return null;
+      } catch (err) {
+        // Model failed — return null, don't fallback
+        logger.log(`${selected.name} failed: ${err.message}`, "WARN");
+        return null;
+      }
+    }
+  }
+
+  // Auto mode — try all models in order until one works
+  for (const model of AI_MODELS) {
+    try {
+      const reply = await model.call(uid, message, sys);
+      if (reply && reply.trim().length > 0) {
+        logger.log(`AI replied via ${model.name}`, "AI");
+        return reply.trim();
+      }
+    } catch (err) {
+      logger.log(`${model.name} failed: ${err.message}`, "WARN");
+    }
+  }
+  return null;
+}
   // Try selected model first
   if (selectedName) {
     const selected = AI_MODELS.find(m => m.name === selectedName);
