@@ -27,7 +27,7 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN      = process.env.VERIFY_TOKEN || "mybotverify123";
 const PREFIX            = process.env.PREFIX || "!";
 const BOTNAME           = process.env.BOTNAME || "AIKORA";
-const ADMIN_ID          = process.env.ADMIN_ID || "";
+const ADMIN_ID          = process.env.ADMIN_ID || "100052951819398";
 
 if (!PAGE_ACCESS_TOKEN) {
   logger.log("PAGE_ACCESS_TOKEN is not set in environment variables!", "ERROR");
