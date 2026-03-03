@@ -1,97 +1,150 @@
 "use strict";
-const express = require('express');
-const axios = require('axios');
-const fs = require('fs');
-const app = express();
 
-app.use(express.json());
+const express    = require("express");
+const bodyParser = require("body-parser");
+const axios      = require("axios");
+const logger     = require("./utils/log");
+const loadCommands = require("./utils/loadCommands");
 
-const PAGE_ACCESS_TOKEN = "";
-const VERIFY_TOKEN = "";
-const PREFIX = "!";
+// ── Config ────────────────────────────────────────────────────────────────────
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const VERIFY_TOKEN      = process.env.VERIFY_TOKEN || "mybotverify123";
+const PREFIX            = process.env.PREFIX || "!";
+const BOTNAME           = process.env.BOTNAME || "AIKORA";
+const ADMIN_ID          = process.env.ADMIN_ID || "";
 
-// ── Commands ──────────────────────────────────────────────────────────────────
-const commands = {
-  ping: async (senderId) => {
-    await sendMessage(senderId, "🏓 Pong! Bot is online!");
-  },
-  help: async (senderId) => {
-    await sendMessage(senderId,
-      "🤖 AIKORA Bot Commands:\n" +
-      "!ping - Check if bot is online\n" +
-      "!help - Show this menu\n" +
-      "!say [text] - Bot repeats your text\n" +
-      "!uid - Show your Facebook ID"
-    );
-  },
-  say: async (senderId, args) => {
-    if (!args.length) return sendMessage(senderId, "Give me something to say!");
-    await sendMessage(senderId, args.join(" "));
-  },
-  uid: async (senderId) => {
-    await sendMessage(senderId, "🪪 Your ID is: " + senderId);
-  }
-};
+if (!PAGE_ACCESS_TOKEN) {
+  logger.log("PAGE_ACCESS_TOKEN is not set in environment variables!", "ERROR");
+  process.exit(1);
+}
 
-// ── Send message ──────────────────────────────────────────────────────────────
+// ── Load commands ─────────────────────────────────────────────────────────────
+const commands = loadCommands();
+
+// ── Send message to Facebook ──────────────────────────────────────────────────
 async function sendMessage(recipientId, text) {
   try {
     await axios.post(
-      "https://graph.facebook.com/v18.0/me/messages",
+      "https://graph.facebook.com/v19.0/me/messages",
       {
         recipient: { id: recipientId },
-        message: { text: text }
+        message:   { text: String(text) }
       },
       { params: { access_token: PAGE_ACCESS_TOKEN } }
     );
   } catch (err) {
-    console.error("Send error:", err.response ? err.response.data : err.message);
+    logger.log("Send error: " + JSON.stringify(err.response?.data || err.message), "ERROR");
   }
 }
 
-// ── Webhook verify ────────────────────────────────────────────────────────────
-app.get('/webhook', (req, res) => {
-  const mode  = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('Webhook verified!');
-    return res.status(200).send(challenge);
+// ── Cooldown tracker ──────────────────────────────────────────────────────────
+const cooldowns = new Map();
+
+// ── Handle incoming message ───────────────────────────────────────────────────
+async function handleMessage(senderId, text) {
+  if (!text || !text.startsWith(PREFIX)) return;
+
+  const args    = text.trim().split(/\s+/);
+  const cmdName = args[0].slice(PREFIX.length).toLowerCase();
+  const cmdArgs = args.slice(1);
+
+  const command = commands.get(cmdName);
+  if (!command) {
+    return sendMessage(senderId, `❓ Unknown command "${PREFIX}${cmdName}".\nType ${PREFIX}help to see all commands.`);
   }
-  return res.sendStatus(403);
+
+  // Cooldown check (5 seconds per user per command)
+  const cooldownKey = `${senderId}:${cmdName}`;
+  const now = Date.now();
+  if (cooldowns.has(cooldownKey)) {
+    const remaining = cooldowns.get(cooldownKey) - now;
+    if (remaining > 0) {
+      return sendMessage(senderId, `⏳ Please wait ${(remaining / 1000).toFixed(1)}s before using ${PREFIX}${cmdName} again.`);
+    }
+  }
+  cooldowns.set(cooldownKey, now + 5000);
+
+  // Build fake api object so commands work the same way
+  const api = {
+    send: (msg) => sendMessage(senderId, msg),
+    sendMessage: (msg) => sendMessage(senderId, msg),
+    commands,
+    PREFIX,
+    BOTNAME,
+  };
+
+  const event = { senderId, text, args: cmdArgs };
+
+  try {
+    logger.log(`CMD: ${cmdName} | User: ${senderId}`, "CMD");
+    await command.run({ api, event, args: cmdArgs });
+  } catch (err) {
+    logger.log(`Error in ${cmdName}: ${err.message}`, "ERROR");
+    sendMessage(senderId, `⚠️ Something went wrong: ${err.message}`);
+  }
+}
+
+// ── Express app ───────────────────────────────────────────────────────────────
+const app = express();
+app.use(bodyParser.json());
+
+// Webhook verification
+app.get("/webhook", (req, res) => {
+  if (
+    req.query["hub.mode"]          === "subscribe" &&
+    req.query["hub.verify_token"]  === VERIFY_TOKEN
+  ) {
+    logger.log("Webhook verified by Facebook!", "SUCCESS");
+    res.status(200).send(req.query["hub.challenge"]);
+  } else {
+    logger.log("Webhook verification failed!", "ERROR");
+    res.sendStatus(403);
+  }
 });
 
-// ── Receive messages ──────────────────────────────────────────────────────────
-app.post('/webhook', async (req, res) => {
+// Receive messages
+app.post("/webhook", async (req, res) => {
   const body = req.body;
-  if (body.object !== 'page') return res.sendStatus(404);
+  if (body.object !== "page") return res.sendStatus(404);
 
   for (const entry of body.entry) {
-    for (const event of entry.messaging) {
-      if (!event.message || !event.message.text) continue;
+    for (const event of (entry.messaging || [])) {
+      if (!event.message) continue;
 
       const senderId = event.sender.id;
-      const text = event.message.text.trim();
+      const text     = event.message.text;
 
-      console.log("Message from " + senderId + ": " + text);
+      if (!text) continue;
 
-      if (!text.startsWith(PREFIX)) continue;
-
-      const args = text.slice(PREFIX.length).trim().split(/\s+/);
-      const cmdName = args.shift().toLowerCase();
-
-      if (commands[cmdName]) {
-        await commands[cmdName](senderId, args);
-      } else {
-        await sendMessage(senderId, "❓ Unknown command. Type !help for the list.");
-      }
+      logger.log(`Message from ${senderId}: ${text}`, "CMD");
+      await handleMessage(senderId, text);
     }
   }
 
   res.status(200).send("EVENT_RECEIVED");
 });
 
-app.get('/', (req, res) => res.send('AIKORA Bot is running!'));
+// Status page
+app.get("/", (req, res) => {
+  res.send(`
+    <html>
+    <head><title>${BOTNAME}</title></head>
+    <body style="font-family:sans-serif;text-align:center;padding:50px;background:#1a1a2e;color:white">
+      <h1>🤖 ${BOTNAME}</h1>
+      <p style="color:#00ff88">✅ Bot is running!</p>
+      <p>Commands loaded: ${commands.size}</p>
+      <p>Prefix: <strong>${PREFIX}</strong></p>
+      <hr style="border-color:#333">
+      <p style="color:#888">Facebook Messenger Bot</p>
+    </body>
+    </html>
+  `);
+});
 
+// ── Start server ──────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('AIKORA running on port ' + PORT));
+app.listen(PORT, () => {
+  logger.log(`${BOTNAME} running on port ${PORT}`, "SYSTEM");
+  logger.log(`Commands loaded: ${commands.size}`, "SYSTEM");
+  logger.log("Waiting for messages...", "SYSTEM");
+});
