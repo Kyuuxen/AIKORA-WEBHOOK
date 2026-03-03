@@ -3,8 +3,24 @@
 const express    = require("express");
 const bodyParser = require("body-parser");
 const axios      = require("axios");
-const logger     = require("./utils/log");
-const loadCommands = require("./utils/loadCommands");
+const logger = { log: (msg, type) => console.log(`[${type||"INFO"}] ${msg}`) };
+const loadCommands = function() {
+  const fs = require("fs");
+  const path = require("path");
+  const commands = new Map();
+  const cmdFolder = path.join(__dirname, "modules/command");
+  if (!fs.existsSync(cmdFolder)) return commands;
+  fs.readdirSync(cmdFolder).filter(f => f.endsWith(".js")).forEach(file => {
+    try {
+      const cmd = require(path.join(cmdFolder, file));
+      if (cmd.config && cmd.config.name && typeof cmd.run === "function") {
+        commands.set(cmd.config.name.toLowerCase(), cmd);
+        console.log("[SUCCESS] Loaded: " + cmd.config.name);
+      }
+    } catch(e) { console.log("[ERROR] " + file + ": " + e.message); }
+  });
+  return commands;
+};
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
