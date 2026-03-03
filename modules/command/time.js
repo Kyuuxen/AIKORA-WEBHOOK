@@ -1,17 +1,25 @@
 module.exports.config = {
   name: "time",
-  description: "Get current date and time",
+  description: "Get current date and time (Philippines UTC+8)",
   usage: "!time",
   category: "utility",
 };
 
 module.exports.run = async function ({ api }) {
-  const now = new Date();
+  // Use the Asia/Manila time zone (Philippines, UTC+8)
+  const manilaDate = new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" });
+  const manila = new Date(manilaDate);
+
+  // Format pieces
+  const dateStr = manila.toDateString(); // e.g. "Tue Mar 03 2026"
+  const timeStr = manila.toLocaleTimeString("en-US", { hour12: false }); // 24-hour format
+  const timezoneLabel = "UTC+8 (Philippines)";
+
   api.send(
     `🕐 Current Time\n` +
     `━━━━━━━━━━━━━━\n` +
-    `📅 Date: ${now.toDateString()}\n` +
-    `⏰ Time: ${now.toLocaleTimeString()}\n` +
-    `🌍 Timezone: UTC${now.getTimezoneOffset() > 8 ? "-" : "+"}${Math.abs(now.getTimezoneOffset() / 60)}`
+    `📅 Date: ${dateStr}\n` +
+    `⏰ Time: ${timeStr}\n` +
+    `🌍 Timezone: ${timezoneLabel}`
   );
 };
