@@ -12,6 +12,6 @@ module.exports.run = async function ({ api }) {
     `━━━━━━━━━━━━━━\n` +
     `📅 Date: ${now.toDateString()}\n` +
     `⏰ Time: ${now.toLocaleTimeString()}\n` +
-    `🌍 Timezone: UTC${now.getTimezoneOffset() > 0 ? "-" : "+"}${Math.abs(now.getTimezoneOffset() / 60)}`
+    `🌍 Timezone: UTC${now.getTimezoneOffset() > 8 ? "-" : "+"}${Math.abs(now.getTimezoneOffset() / 60)}`
   );
 };
