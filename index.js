@@ -112,19 +112,39 @@ const AI_MODELS = [
 ];
 
 async function askAI(uid, message) {
-  const sys = `You are ${BOTNAME}, a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use emojis sometimes. Never say you are Copilot, GPT, or any other AI — you are always ${BOTNAME}.`;
+  const sys = "You are " + BOTNAME + ", a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use emojis sometimes. Never say you are Copilot or GPT — you are always " + BOTNAME + ".";
 
-  const keyMap = {
-    copilot:    "Copilot",
-    gpt5:       "GPT-5",
-    aria:       "Aria",
-    you:        "You.com",
-    perplexity: "Perplexity",
-    mistral:    "Mistral",
-  };
-
-  const selectedKey  = global.aiMode && global.aiMode !== "auto" ? global.aiMode : null;
+  const keyMap = { copilot:"Copilot", gpt5:"GPT-5", aria:"Aria", you:"You.com", perplexity:"Perplexity", mistral:"Mistral" };
+  const selectedKey = (global.aiMode && global.aiMode !== "auto") ? global.aiMode : null;
   const selectedName = selectedKey ? keyMap[selectedKey] : null;
+
+  if (selectedName) {
+    const selected = AI_MODELS.find(function(m) { return m.name === selectedName; });
+    if (selected) {
+      try {
+        const reply = await selected.call(uid, message, sys);
+        if (reply && reply.trim().length > 0) return reply.trim();
+        return null;
+      } catch (err) {
+        logger.log(selected.name + " failed: " + err.message, "WARN");
+        return null;
+      }
+    }
+  }
+
+  for (const model of AI_MODELS) {
+    try {
+      const reply = await model.call(uid, message, sys);
+      if (reply && reply.trim().length > 0) {
+        logger.log("AI: " + model.name, "AI");
+        return reply.trim();
+      }
+    } catch (err) {
+      logger.log(model.name + " failed: " + err.message, "WARN");
+    }
+  }
+  return null;
+}
 
   // If a specific model is selected — use ONLY that model, no fallback
   if (selectedName) {
