@@ -70,14 +70,23 @@ async function postToFacebook(message) {
     throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set in Render environment variables.");
   }
 
-  await axios.post(
-    `https://graph.facebook.com/v19.0/${pageId}/feed`,
-    {
-      message,
-      access_token: feedToken,
-    },
-    { timeout: 15000 }
-  );
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${pageId}/feed`,
+      {
+        message,
+        access_token: feedToken,
+      },
+      { timeout: 15000 }
+    );
+  } catch (err) {
+    // Show exact Facebook error message
+    const fbError = err.response?.data?.error;
+    if (fbError) {
+      throw new Error(`Facebook Error ${fbError.code}: ${fbError.message} (type: ${fbError.type})`);
+    }
+    throw new Error(`Request failed: ${err.message}`);
+  }
 }
 
 // ── Main auto-post logic ──────────────────────────────────────────────────────
