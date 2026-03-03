@@ -3,7 +3,7 @@ const path = require("path");
 
 module.exports = function loadCommands() {
   const commands = new Map();
-  const cmdFolder = path.join(__dirname, "../modules/commands");
+const cmdFolder = path.join(__dirname, "../modules/command");
   if (!fs.existsSync(cmdFolder)) return commands;
   const files = fs.readdirSync(cmdFolder).filter(f => f.endsWith(".js"));
   for (const file of files) {
