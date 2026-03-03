@@ -4,6 +4,7 @@ const express    = require("express");
 const bodyParser = require("body-parser");
 const axios      = require("axios");
 const logger = { log: (msg, type) => console.log(`[${type||"INFO"}] ${msg}`) };
+
 const loadCommands = function() {
   const fs = require("fs");
   const path = require("path");
@@ -32,7 +33,7 @@ if (!PAGE_ACCESS_TOKEN) { console.log("[ERROR] PAGE_ACCESS_TOKEN not set!"); pro
 const commands = loadCommands();
 global.commands = commands;
 
-// Memory per user
+// ── Memory ────────────────────────────────────────────────────────────────────
 const userMemory = new Map();
 function addMemory(uid, role, text) {
   if (!userMemory.has(uid)) userMemory.set(uid, []);
@@ -46,27 +47,88 @@ function buildContext(uid, msg) {
   return m.slice(-6).map(x => (x.role === "user" ? "User" : BOTNAME) + ": " + x.text).join("\n") + "\nUser: " + msg;
 }
 
-// AI - Copilot with GPT-5 fallback
+// ── AI Models — tries each one until one works ────────────────────────────────
+const AI_MODELS = [
+  {
+    name: "Copilot",
+    call: async (uid, msg, sys) => {
+      const r = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
+        params: { prompt: sys + "\n\n" + buildContext(uid, msg), model: "default", user: uid },
+        timeout: 20000,
+      });
+      return r.data?.data?.text || null;
+    }
+  },
+  {
+    name: "GPT-5",
+    call: async (uid, msg, sys) => {
+      const r = await axios.get("https://api-library-kohi.onrender.com/api/pollination-ai", {
+        params: { prompt: sys + "\n\nUser: " + msg, model: "openai-large", user: uid },
+        timeout: 20000,
+      });
+      return r.data?.data || null;
+    }
+  },
+  {
+    name: "Aria",
+    call: async (uid, msg) => {
+      const r = await axios.get("https://betadash-api-swordslush-production.up.railway.app/Aria", {
+        params: { ask: msg, userid: uid },
+        timeout: 20000,
+      });
+      return r.data?.message || r.data?.response || r.data?.reply || null;
+    }
+  },
+  {
+    name: "You.com",
+    call: async (uid, msg) => {
+      const r = await axios.get("https://betadash-api-swordslush-production.up.railway.app/you", {
+        params: { chat: msg },
+        timeout: 20000,
+      });
+      return r.data?.message || r.data?.response || r.data?.youResponse || null;
+    }
+  },
+  {
+    name: "Perplexity",
+    call: async (uid, msg, sys) => {
+      const r = await axios.get("https://api-library-kohi.onrender.com/api/pollination-ai", {
+        params: { prompt: sys + "\n\nUser: " + msg, model: "perplexity-reasoning", user: uid + "_p" },
+        timeout: 20000,
+      });
+      return r.data?.data || null;
+    }
+  },
+  {
+    name: "Mistral",
+    call: async (uid, msg, sys) => {
+      const r = await axios.get("https://api-library-kohi.onrender.com/api/pollination-ai", {
+        params: { prompt: sys + "\n\nUser: " + msg, model: "mistral", user: uid + "_m" },
+        timeout: 20000,
+      });
+      return r.data?.data || null;
+    }
+  },
+];
+
 async function askAI(uid, message) {
-  const sys = `You are ${BOTNAME}, a friendly AI assistant on Facebook Messenger. Be helpful and concise. Never say you are Copilot or GPT — you are ${BOTNAME}.`;
-  try {
-    const r = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
-      params: { prompt: sys + "\n\n" + buildContext(uid, message), model: "default", user: uid },
-      timeout: 30000,
-    });
-    if (r.data && r.data.data && r.data.data.text) return r.data.data.text;
-  } catch {}
-  try {
-    const r = await axios.get("https://api-library-kohi.onrender.com/api/pollination-ai", {
-      params: { prompt: sys + "\n\nUser: " + message, model: "openai-large", user: uid },
-      timeout: 30000,
-    });
-    if (r.data && r.data.data) return r.data.data;
-  } catch {}
+  const sys = `You are ${BOTNAME}, a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use emojis sometimes. Never say you are Copilot, GPT, or any other AI — you are always ${BOTNAME}.`;
+
+  for (const model of AI_MODELS) {
+    try {
+      const reply = await model.call(uid, message, sys);
+      if (reply && reply.trim().length > 0) {
+        logger.log(`AI replied via ${model.name}`, "AI");
+        return reply.trim();
+      }
+    } catch (err) {
+      logger.log(`${model.name} failed: ${err.message}`, "WARN");
+    }
+  }
   return null;
 }
 
-// Send message (splits long text)
+// ── Send message ──────────────────────────────────────────────────────────────
 async function sendMessage(recipientId, text) {
   const MAX = 1900;
   let str = String(text);
@@ -84,7 +146,9 @@ async function sendMessage(recipientId, text) {
         { recipient: { id: recipientId }, message: { text: part } },
         { params: { access_token: PAGE_ACCESS_TOKEN } }
       );
-    } catch (err) { logger.log("Send error: " + JSON.stringify(err.response?.data || err.message), "ERROR"); }
+    } catch (err) {
+      logger.log("Send error: " + JSON.stringify(err.response?.data || err.message), "ERROR");
+    }
   }
 }
 
@@ -128,15 +192,23 @@ async function handleCommand(senderId, text) {
   cooldowns.set(key, now + 5000);
   const api = { send: (m) => sendMessage(senderId, m), sendMessage: (m) => sendMessage(senderId, m), commands, PREFIX, BOTNAME };
   const event = { senderId, text, args: cmdArgs };
-  try { logger.log(`CMD: ${cmdName} | User: ${senderId}`, "CMD"); await command.run({ api, event, args: cmdArgs }); }
-  catch (err) { logger.log(`Error in ${cmdName}: ${err.message}`, "ERROR"); sendMessage(senderId, `⚠️ Something went wrong: ${err.message}`); }
+  try {
+    logger.log(`CMD: ${cmdName} | User: ${senderId}`, "CMD");
+    await command.run({ api, event, args: cmdArgs });
+  } catch (err) {
+    logger.log(`Error in ${cmdName}: ${err.message}`, "ERROR");
+    sendMessage(senderId, `⚠️ Something went wrong: ${err.message}`);
+  }
 }
 
 async function handleAI(senderId, text) {
   logger.log(`AI from ${senderId}: ${text}`, "AI");
   addMemory(senderId, "user", text);
   const reply = await askAI(senderId, text);
-  if (!reply) { await sendMessage(senderId, "😅 I'm having trouble thinking right now. Try again in a moment!"); return; }
+  if (!reply) {
+    await sendMessage(senderId, `Sorry, all AI services are currently busy. Please try again in a moment! 🙏`);
+    return;
+  }
   addMemory(senderId, "bot", reply);
   await sendMessage(senderId, reply);
 }
@@ -180,12 +252,13 @@ app.post("/webhook", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send(`<html><head><title>${BOTNAME}</title></head><body style="font-family:sans-serif;text-align:center;padding:50px;background:#1a1a2e;color:white"><h1>🤖 ${BOTNAME}</h1><p style="color:#00ff88">✅ Online</p><p>Commands: ${commands.size} | AI: Copilot + GPT-5 fallback</p><p>Prefix: <strong>${PREFIX}</strong> | Talk freely without prefix!</p></body></html>`);
+  res.send(`<html><head><title>${BOTNAME}</title></head><body style="font-family:sans-serif;text-align:center;padding:50px;background:#1a1a2e;color:white"><h1>🤖 ${BOTNAME}</h1><p style="color:#00ff88">✅ Online</p><p>Commands: ${commands.size} | AI: ${AI_MODELS.map(m=>m.name).join(" → ")}</p><p>Prefix: <strong>${PREFIX}</strong></p></body></html>`);
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   logger.log(`${BOTNAME} running on port ${PORT}`, "SYSTEM");
-  logger.log(`Commands: ${commands.size} | AI: Copilot + GPT-5 fallback`, "SYSTEM");
+  logger.log(`Commands: ${commands.size}`, "SYSTEM");
+  logger.log(`AI chain: ${AI_MODELS.map(m => m.name).join(" → ")}`, "SYSTEM");
   await setPageOnline();
 });
