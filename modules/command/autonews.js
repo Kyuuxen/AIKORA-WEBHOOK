@@ -143,54 +143,36 @@ async function autoPost(notifyFn) {
   }
 }
 
-// ── Command handler ───────────────────────────────────────────────────────────
-module.exports.run = async function ({ api, args, event }) {
-  const action   = args[0]?.toLowerCase();
-  const senderId = event.senderId;
-  const notify   = (msg) => api.send(msg, senderId);
+// ── Auto starter ──────────────────────────────────────────────────────────────
+function startAutoNews() {
+  if (interval) return;
 
-  if (action === "on") {
-    if (interval) return api.send("⚠️ Already running. Use !autonews off to stop first.");
-
-    if (!process.env.PAGE_ID || !process.env.PAGE_FEED_TOKEN) {
-      return api.send("❌ Missing PAGE_ID or PAGE_FEED_TOKEN in Render environment.");
-    }
-
-    await autoPost(notify);
-    interval = setInterval(() => autoPost(notify), 15 * 60 * 1000);
-    return api.send("🚀 Auto news started!\n📸 Posts with images every 15 minutes.\nType !autonews off to stop.");
-  }
-
-  if (action === "off") {
-    if (!interval) return api.send("⚠️ Auto news is not running.");
-    clearInterval(interval);
-    interval = null;
-    return api.send("🛑 Auto news stopped.");
-  }
-
-  if (action === "test") {
-    notify("⏳ Testing news post with image...");
-    await autoPost(notify);
+  if (!process.env.PAGE_ID || !process.env.PAGE_FEED_TOKEN) {
+    console.log("❌ AutoNews not started: Missing PAGE_ID or PAGE_FEED_TOKEN.");
     return;
   }
 
-  if (action === "status") {
-    return api.send(
-      `📊 Auto News Status\n` +
-      `━━━━━━━━━━━━━━\n` +
-      `Status: ${interval ? "🟢 Running" : "🔴 Stopped"}\n` +
-      `Articles posted: ${postedUrls.size}\n` +
-      `PAGE_ID: ${process.env.PAGE_ID ? "✅" : "❌"}\n` +
-      `PAGE_FEED_TOKEN: ${process.env.PAGE_FEED_TOKEN ? "✅" : "❌"}\n` +
-      `GNEWS_API_KEY: ${process.env.GNEWS_API_KEY ? "✅" : "⚠️ using demo"}`
-    );
-  }
+  console.log("🚀 AutoNews started automatically...");
 
-  api.send(
-    "📰 Auto News Commands:\n" +
-    "!autonews on     → Start auto posting with images\n" +
-    "!autonews off    → Stop auto posting\n" +
-    "!autonews test   → Test one post now\n" +
-    "!autonews status → Check status"
+  // First post immediately
+  autoPost((msg) => console.log("[AutoNews]", msg));
+
+  // Then repeat every 15 minutes
+  interval = setInterval(() => {
+    autoPost((msg) => console.log("[AutoNews]", msg));
+  }, 15 * 60 * 1000);
+}
+
+// Start automatically when file loads
+startAutoNews();
+
+
+// ── Optional: Keep command only for status (optional) ─────────────────────────
+module.exports.run = async function ({ api }) {
+  return api.send(
+    `📊 Auto News Status\n` +
+    `━━━━━━━━━━━━━━\n` +
+    `Status: ${interval ? "🟢 Running" : "🔴 Stopped"}\n` +
+    `Articles posted: ${postedUrls.size}`
   );
 };
