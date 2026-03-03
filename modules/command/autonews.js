@@ -108,7 +108,7 @@ async function autoPost(notifyFn) {
 
     postedUrls.add(article.url);
 
-    const rawContent = `${article.title}\n\n${article.description || ""}\n\nRead more: ${article.url}`;
+    const rawContent = `${article.title}\n\n${article.description || ""}`;
     const finalPost  = await rewriteWithCopilot(rawContent);
 
     await postToFacebook(finalPost);
