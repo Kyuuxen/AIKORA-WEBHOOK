@@ -23,23 +23,27 @@ module.exports.run = async function ({ api, args, event }) {
     }
   }
 
-  if (!prompt) return api.send(
-    "🚀 Usage: !copilot [question]\n" +
-    "Flags:\n" +
-    "  !copilot -think [question] → Deep thinking mode\n" +
-    "  !copilot -gpt5 [question]  → GPT-5 mode"
-  );
+  if (!prompt) {
+    return api.send(
+      "🚀 Usage: !copilot [question]\n" +
+      "Flags:\n" +
+      "  !copilot -think [question] → Deep thinking mode\n" +
+      "  !copilot -gpt5 [question]  → GPT-5 mode"
+    );
+  }
 
   api.send("⏳ Copilot is thinking...");
 
   try {
-    const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
-      params: { prompt, model, user: event.senderId },
-      timeout: 60000,
-    });
+    const res = await axios.get(
+      `https://api-library-kohi.onrender.com/api/copilot?prompt=${encodeURIComponent(prompt)}&model=${model}&user=${event.senderId}`,
+      { timeout: 60000 }
+    );
 
     const result = res.data?.data;
-    if (!result?.text) return api.send("⚠️ Couldn't get an answer from Copilot.");
+    if (!result?.text) {
+      return api.send("⚠️ Couldn't get an answer from Copilot.");
+    }
 
     let msg = `🚀 COPILOT\n━━━━━━━━━━━━━━\n${result.text}`;
 
