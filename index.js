@@ -114,7 +114,37 @@ const AI_MODELS = [
 async function askAI(uid, message) {
   const sys = `You are ${BOTNAME}, a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use emojis sometimes. Never say you are Copilot, GPT, or any other AI — you are always ${BOTNAME}.`;
 
+  const keyMap = {
+    copilot: "Copilot",
+    gpt5: "GPT-5",
+    aria: "Aria",
+    you: "You.com",
+    perplexity: "Perplexity",
+    mistral: "Mistral",
+  };
+
+  const selectedKey = global.aiMode && global.aiMode !== "auto" ? global.aiMode : null;
+  const selectedName = selectedKey ? keyMap[selectedKey] : null;
+
+  // Try selected model first
+  if (selectedName) {
+    const selected = AI_MODELS.find(m => m.name === selectedName);
+    if (selected) {
+      try {
+        const reply = await selected.call(uid, message, sys);
+        if (reply && reply.trim().length > 0) {
+          logger.log(`AI replied via ${selected.name} (selected)`, "AI");
+          return reply.trim();
+        }
+      } catch (err) {
+        logger.log(`${selected.name} failed: ${err.message} — trying others`, "WARN");
+      }
+    }
+  }
+
+  // Fallback — try all models in order
   for (const model of AI_MODELS) {
+    if (selectedName && model.name === selectedName) continue;
     try {
       const reply = await model.call(uid, message, sys);
       if (reply && reply.trim().length > 0) {
@@ -126,8 +156,7 @@ async function askAI(uid, message) {
     }
   }
   return null;
-}
-
+      }
 // ── Send message ──────────────────────────────────────────────────────────────
 async function sendMessage(recipientId, text) {
   const MAX = 1900;
