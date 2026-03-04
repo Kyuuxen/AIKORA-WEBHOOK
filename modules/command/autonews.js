@@ -1,110 +1,103 @@
 const axios = require("axios");
-const fs    = require("fs");
-const path  = require("path");
-const crypto = require("crypto");
 
 module.exports.config = {
   name:        "autonews",
-  description: "Auto post news with images to Facebook Page every 15 minutes",
-  usage:       "!autonews on | off | status | test | reset",
+  description: "Auto post news to Facebook Page every 15 minutes",
+  usage:       "!autonews status | test | on | off | reset",
   category:    "Automation",
 };
 
-// ── Persistent storage ────────────────────────────────────────────────────────
-// Stores URL hashes instead of full URLs
-// A hash is only 8 characters vs 100+ for a full URL
-// This means 1MB of storage = ~125,000 articles remembered (practically unlimited)
-const DB_FILE = path.join(__dirname, ".autonews_db.json");
+// ── JSONBin.io as permanent external database ─────────────────────────────────
+// Free forever, no signup needed if you have a bin ID
+// Survives Render restarts because data is stored on JSONBin's servers
+const JSONBIN_KEY = process.env.JSONBIN_KEY || "";
+const JSONBIN_BIN = process.env.JSONBIN_BIN || "";
 
-function hashUrl(url) {
-  return crypto.createHash("md5").update(url).digest("hex").substring(0, 8);
+async function dbLoad() {
+  if (!JSONBIN_KEY || !JSONBIN_BIN) return new Set();
+  try {
+    const res = await axios.get("https://api.jsonbin.io/v3/b/" + JSONBIN_BIN + "/latest", {
+      headers: { "X-Master-Key": JSONBIN_KEY },
+      timeout: 10000,
+    });
+    const arr = res.data && res.data.record && res.data.record.posted ? res.data.record.posted : [];
+    console.log("[AutoNews] DB loaded: " + arr.length + " posted titles");
+    return new Set(arr);
+  } catch (e) {
+    console.log("[AutoNews] DB load failed:", e.message);
+    return new Set();
+  }
 }
 
-function loadDB() {
+async function dbSave(postedSet) {
+  if (!JSONBIN_KEY || !JSONBIN_BIN) return;
   try {
-    if (fs.existsSync(DB_FILE)) {
-      const raw  = fs.readFileSync(DB_FILE, "utf8");
-      const data = JSON.parse(raw);
-      return {
-        hashes:      new Set(data.hashes || []),
-        totalPosted: data.totalPosted  || 0,
-        lastPosted:  data.lastPosted   || null,
-        startedAt:   data.startedAt    || new Date().toISOString(),
-      };
-    }
+    const arr = Array.from(postedSet).slice(-1000); // keep last 1000
+    await axios.put(
+      "https://api.jsonbin.io/v3/b/" + JSONBIN_BIN,
+      { posted: arr },
+      {
+        headers: { "X-Master-Key": JSONBIN_KEY, "Content-Type": "application/json" },
+        timeout: 10000,
+      }
+    );
   } catch (e) {
-    console.log("[AutoNews] DB load error:", e.message);
+    console.log("[AutoNews] DB save failed:", e.message);
   }
-  return {
-    hashes:      new Set(),
-    totalPosted: 0,
-    lastPosted:  null,
-    startedAt:   new Date().toISOString(),
+}
+
+// ── Normalize title for reliable comparison ───────────────────────────────────
+function normalizeTitle(title) {
+  return title.toLowerCase().replace(/[^a-z0-9]/g, "").substring(0, 50);
+}
+
+// ── Global state ──────────────────────────────────────────────────────────────
+if (!global.autoNewsState) {
+  global.autoNewsState = {
+    posted:        new Set(),
+    totalPosted:   0,
+    lastPosted:    null,
+    interval:      null,
+    isPosting:     false,
+    categoryIndex: 0,
+    dbReady:       false,
   };
 }
+const state = global.autoNewsState;
 
-function saveDB(db) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify({
-      hashes:      Array.from(db.hashes), // unlimited — no slice
-      totalPosted: db.totalPosted,
-      lastPosted:  db.lastPosted,
-      startedAt:   db.startedAt,
-    }, null, 2), "utf8");
-  } catch (e) {
-    console.log("[AutoNews] DB save error:", e.message);
-  }
+// ── Load DB on startup ────────────────────────────────────────────────────────
+async function initDB() {
+  if (state.dbReady) return;
+  const loaded = await dbLoad();
+  loaded.forEach(function(t) { state.posted.add(t); });
+  state.dbReady = true;
+  console.log("[AutoNews] DB ready. " + state.posted.size + " titles loaded.");
 }
 
-function isPosted(url) {
-  return db.hashes.has(hashUrl(url));
-}
-
-function markPosted(url) {
-  db.hashes.add(hashUrl(url));
-  db.totalPosted++;
-  db.lastPosted = new Date().toISOString();
-  saveDB(db);
-}
-
-const db = loadDB();
-console.log("[AutoNews] DB loaded — " + db.hashes.size + " articles remembered (" + db.totalPosted + " total posted)");
-
-// ── State ─────────────────────────────────────────────────────────────────────
-let interval  = null;
-let isPosting = false;
+// ── Categories to rotate through ─────────────────────────────────────────────
+const CATEGORIES = ["general", "world", "nation", "business", "technology", "entertainment", "sports", "science", "health"];
 
 // ── Fetch news ────────────────────────────────────────────────────────────────
-async function getNews() {
-  // Try GNews
+async function fetchGNews(category) {
   try {
     const res = await axios.get("https://gnews.io/api/v4/top-headlines", {
-      params: {
-        lang:    "en",
-        country: "ph",
-        max:     20,
-        apikey:  process.env.GNEWS_API_KEY || "demo",
-      },
+      params: { lang: "en", country: "ph", topic: category, max: 10, apikey: process.env.GNEWS_API_KEY || "demo" },
       timeout: 15000,
     });
-    const articles = res.data && res.data.articles ? res.data.articles : [];
-    if (articles.length > 0) {
-      console.log("[AutoNews] GNews returned " + articles.length + " articles");
-      return articles;
-    }
-  } catch (err) {
-    console.log("[AutoNews] GNews failed:", err.message);
+    return (res.data && res.data.articles) ? res.data.articles : [];
+  } catch (e) {
+    console.log("[AutoNews] GNews failed:", e.message);
+    return [];
   }
+}
 
-  // Fallback BBC RSS
+async function fetchRSS() {
   try {
-    const rss = await axios.get(
+    const res = await axios.get(
       "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml",
       { timeout: 15000 }
     );
-    const items = rss.data && rss.data.items ? rss.data.items : [];
-    console.log("[AutoNews] BBC RSS returned " + items.length + " articles");
-    return items.map(function(item) {
+    return ((res.data && res.data.items) ? res.data.items : []).map(function(item) {
       return {
         title:       item.title,
         description: item.description ? item.description.replace(/<[^>]*>/g, "").substring(0, 200) : "",
@@ -114,25 +107,42 @@ async function getNews() {
       };
     });
   } catch (e) {
-    console.log("[AutoNews] BBC RSS failed:", e.message);
+    console.log("[AutoNews] RSS failed:", e.message);
     return [];
   }
+}
+
+async function getNews() {
+  const category = CATEGORIES[state.categoryIndex % CATEGORIES.length];
+  state.categoryIndex++;
+  const gnews = await fetchGNews(category);
+  if (gnews.length > 0) return gnews;
+  return await fetchRSS();
+}
+
+// ── Duplicate check ───────────────────────────────────────────────────────────
+function isDuplicate(article) {
+  if (!article.title) return true;
+  return state.posted.has(normalizeTitle(article.title));
+}
+
+function markPosted(article) {
+  if (article.title) state.posted.add(normalizeTitle(article.title));
+  state.totalPosted++;
+  state.lastPosted = new Date().toISOString();
+  dbSave(state.posted); // save to JSONBin async (dont await, non-blocking)
 }
 
 // ── Rewrite with AI ───────────────────────────────────────────────────────────
 async function rewriteWithAI(text) {
   try {
     const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
-      params: {
-        prompt: "Rewrite this as a short engaging Facebook news post (max 3 sentences, no hashtags, no markdown, no asterisks):\n\n" + text,
-      },
-      timeout: 30000,
+      params: { prompt: "Rewrite this as a short engaging Facebook news post (max 3 sentences, no hashtags, no markdown, no asterisks):\n\n" + text },
+      timeout: 25000,
     });
-    const result = res.data && res.data.data && res.data.data.text ? res.data.data.text : null;
-    if (result) return result;
-  } catch (e) {
-    console.log("[AutoNews] AI rewrite failed:", e.message);
-  }
+    const r = (res.data && res.data.data && res.data.data.text) ? res.data.data.text : null;
+    if (r && r.length > 20) return r.replace(/\*\*/g, "").replace(/\*/g, "").trim();
+  } catch (e) {}
   return text;
 }
 
@@ -148,167 +158,119 @@ async function postToFacebook(caption, imageUrl, articleUrl) {
   const pageId    = process.env.PAGE_ID;
   const feedToken = process.env.PAGE_FEED_TOKEN;
   if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
-
   const fullCaption = caption + (articleUrl ? "\n\n🔗 Read more: " + articleUrl : "");
-
   if (imageUrl) {
     try {
-      await axios.post(
-        "https://graph.facebook.com/v19.0/" + pageId + "/photos",
-        { url: imageUrl, caption: fullCaption, access_token: feedToken },
-        { timeout: 20000 }
-      );
+      await axios.post("https://graph.facebook.com/v19.0/" + pageId + "/photos",
+        { url: imageUrl, caption: fullCaption, access_token: feedToken }, { timeout: 20000 });
       return "photo";
-    } catch (e) {
-      console.log("[AutoNews] Photo post failed, trying link:", e.response && e.response.data && e.response.data.error ? e.response.data.error.message : e.message);
-    }
+    } catch (e) { console.log("[AutoNews] Photo failed, trying link:", e.message); }
   }
-
-  await axios.post(
-    "https://graph.facebook.com/v19.0/" + pageId + "/feed",
-    { message: caption, link: articleUrl || undefined, access_token: feedToken },
-    { timeout: 15000 }
-  );
+  await axios.post("https://graph.facebook.com/v19.0/" + pageId + "/feed",
+    { message: caption, link: articleUrl || undefined, access_token: feedToken }, { timeout: 15000 });
   return "link";
 }
 
-// ── Pick unposted article ─────────────────────────────────────────────────────
-function pickArticle(articles) {
-  for (let i = 0; i < articles.length; i++) {
-    const a = articles[i];
-    if (!a.url) continue;
-    if (!isPosted(a.url)) return a;
-  }
-  return null;
-}
-
-// ── Main post logic ───────────────────────────────────────────────────────────
+// ── Main post ─────────────────────────────────────────────────────────────────
 async function autoPost(notifyFn) {
-  if (isPosting) {
-    notifyFn("⏳ Still posting previous article, skipping...");
-    return;
-  }
-
-  isPosting = true;
+  if (state.isPosting) { notifyFn("⏳ Still posting, skipping..."); return; }
+  state.isPosting = true;
   try {
-    const articles = await getNews();
-    if (!articles.length) {
-      notifyFn("⚠️ No news articles found from any source.");
-      return;
+    await initDB(); // make sure DB is loaded
+
+    let article = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const articles = await getNews();
+      article = null;
+      for (let i = 0; i < articles.length; i++) {
+        if (!isDuplicate(articles[i])) { article = articles[i]; break; }
+      }
+      if (article) break;
+      console.log("[AutoNews] All articles already posted, trying next category...");
     }
 
-    let article = pickArticle(articles);
-
-    // All current batch already posted — this is normal, just wait for new articles
     if (!article) {
-      notifyFn("ℹ️ All " + articles.length + " current articles already posted. Waiting for new news...");
-      return;
+      // Clear oldest half and retry once more
+      const arr = Array.from(state.posted);
+      state.posted = new Set(arr.slice(Math.floor(arr.length / 2)));
+      await dbSave(state.posted);
+      const articles = await getNews();
+      for (let i = 0; i < articles.length; i++) {
+        if (!isDuplicate(articles[i])) { article = articles[i]; break; }
+      }
     }
 
-    // Mark posted BEFORE posting to prevent duplicates
-    markPosted(article.url);
+    if (!article) { notifyFn("⚠️ No new articles right now. Try again later."); return; }
 
-    const source     = article.source && article.source.name ? article.source.name : "News";
-    const rawContent = article.title + "\n\n" + (article.description || "");
-    const finalPost  = await rewriteWithAI(rawContent);
-    const imageUrl   = article.image || article.urlToImage || makeHeadlineImage(article.title, source);
+    markPosted(article);
 
-    const method = await postToFacebook(finalPost, imageUrl, article.url);
+    const source    = (article.source && article.source.name) ? article.source.name : "News";
+    const rawText   = article.title + "\n\n" + (article.description || "");
+    const finalPost = await rewriteWithAI(rawText);
+    const imageUrl  = article.image || article.urlToImage || makeHeadlineImage(article.title, source);
+    const method    = await postToFacebook(finalPost, imageUrl, article.url);
+
     notifyFn("✅ Posted (" + method + "): " + article.title);
-
   } catch (err) {
-    notifyFn("❌ Auto-post failed: " + err.message);
-    console.error("[AutoNews] Error:", err.message);
+    notifyFn("❌ Failed: " + err.message);
   } finally {
-    isPosting = false;
+    state.isPosting = false;
   }
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 function startAutoNews() {
-  if (interval) return;
+  if (state.interval) return;
   if (!process.env.PAGE_ID || !process.env.PAGE_FEED_TOKEN) {
     console.log("[AutoNews] Not started: Missing PAGE_ID or PAGE_FEED_TOKEN.");
     return;
   }
-
-  console.log("[AutoNews] Starting... " + db.hashes.size + " URLs remembered.");
-
-  // First post after 30 seconds
-  setTimeout(function() {
-    autoPost(function(msg) { console.log("[AutoNews]", msg); });
-  }, 30000);
-
-  // Every 15 minutes
-  interval = setInterval(function() {
-    autoPost(function(msg) { console.log("[AutoNews]", msg); });
-  }, 15 * 60 * 1000);
+  if (!JSONBIN_KEY || !JSONBIN_BIN) {
+    console.log("[AutoNews] WARNING: JSONBIN_KEY or JSONBIN_BIN not set. Duplicates may occur after restarts!");
+  }
+  console.log("[AutoNews] Starting...");
+  setTimeout(function() { autoPost(function(msg) { console.log("[AutoNews]", msg); }); }, 30000);
+  state.interval = setInterval(function() { autoPost(function(msg) { console.log("[AutoNews]", msg); }); }, 15 * 60 * 1000);
 }
 
 startAutoNews();
 
-// ── Command handler ───────────────────────────────────────────────────────────
+// ── Command ───────────────────────────────────────────────────────────────────
 module.exports.run = async function ({ api, args, event }) {
-  const uid    = event.senderId;
-  const ADMINS = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
+  const uid     = event.senderId;
+  const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
   const isAdmin = ADMINS.length === 0 || ADMINS.includes(uid);
+  const action  = (args[0] || "status").toLowerCase();
 
-  const action = args[0] ? args[0].toLowerCase() : "status";
-
-  // Status is public — anyone can check
-  // All other actions are admin only
-  if (action !== "status" && !isAdmin) {
-    return api.send("⛔ This command is for admins only!");
-  }
+  if (action !== "status" && !isAdmin) return api.send("⛔ Admins only!");
 
   if (action === "status") {
-    const dbSizeBytes = fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).size : 0;
-    const dbSizeKB    = (dbSizeBytes / 1024).toFixed(1);
     return api.send(
-      "📰 AutoNews Status\n" +
-      "━━━━━━━━━━━━━━\n" +
-      "Status: "        + (interval ? "🟢 Running" : "🔴 Stopped") + "\n" +
-      "Articles remembered: " + db.hashes.size + " (unlimited)\n" +
-      "Total ever posted: "   + db.totalPosted  + "\n" +
-      "DB file size: "        + dbSizeKB + " KB\n" +
-      "Last posted: "         + (db.lastPosted ? new Date(db.lastPosted).toLocaleString() : "Never") + "\n" +
-      "Running since: "       + (db.startedAt ? new Date(db.startedAt).toLocaleString() : "Unknown")
+      "📰 AutoNews Status\n━━━━━━━━━━━━━━\n" +
+      "Status: "          + (state.interval ? "🟢 Running" : "🔴 Stopped") + "\n" +
+      "DB: "              + (JSONBIN_BIN ? "✅ JSONBin connected" : "⚠️ No DB (will repeat on restart)") + "\n" +
+      "Titles remembered: " + state.posted.size + "\n" +
+      "Total posted: "    + state.totalPosted + "\n" +
+      "Last posted: "     + (state.lastPosted ? new Date(state.lastPosted).toLocaleString() : "Never")
     );
   }
-
-  if (action === "test") {
-    api.send("🧪 Posting a test article now...");
-    await autoPost(function(msg) { api.send(msg); });
-    return;
-  }
-
+  if (action === "test") { api.send("🧪 Posting now..."); await autoPost(function(m) { api.send(m); }); return; }
   if (action === "reset") {
-    const count = db.hashes.size;
-    db.hashes.clear();
-    saveDB(db);
-    return api.send("🔄 Cleared " + count + " remembered URLs. Fresh start next post!");
+    const c = state.posted.size;
+    state.posted.clear();
+    await dbSave(state.posted);
+    return api.send("🔄 Cleared " + c + " titles from DB!");
   }
-
   if (action === "on") {
-    if (interval) return api.send("✅ AutoNews is already running!");
+    if (state.interval) return api.send("Already running!");
     startAutoNews();
     return api.send("✅ AutoNews started!");
   }
-
   if (action === "off") {
-    if (!interval) return api.send("🔴 AutoNews is already stopped!");
-    clearInterval(interval);
-    interval = null;
+    if (!state.interval) return api.send("Already stopped!");
+    clearInterval(state.interval);
+    state.interval = null;
     return api.send("🔴 AutoNews stopped.");
   }
-
-  api.send(
-    "📰 AutoNews Commands\n" +
-    "━━━━━━━━━━━━━━\n" +
-    "!autonews status — Check status + DB size\n" +
-    "!autonews test   — Post now\n" +
-    "!autonews reset  — Clear history\n" +
-    "!autonews on     — Start\n" +
-    "!autonews off    — Stop"
-  );
+  api.send("!autonews status | test | reset | on | off");
 };
