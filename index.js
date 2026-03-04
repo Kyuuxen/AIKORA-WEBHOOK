@@ -89,16 +89,27 @@ const AI_MODELS = [
         timeout: 20000
       }).then(function(r) { return (r.data && (r.data.message || r.data.response)) ? (r.data.message || r.data.response) : null; });
     }
-  },
-  {
-    key: "perplexity", name: "Perplexity",
-    call: function(uid, msg, sys) {
-      return axios.get("https://api-library-kohi.onrender.com/api/pollination-ai", {
-        params: { prompt: sys + "\n\nUser: " + msg, model: "perplexity-reasoning", user: uid + "_p" },
-        timeout: 20000
-      }).then(function(r) { return (r.data && r.data.data) ? r.data.data : null; });
-    }
-  },
+  },{
+  key: "perplexity", name: "Perplexity",
+  call: function(uid, msg, sys) {
+    return axios.get("https://api-library-kohi.onrender.com/api/pollination-ai", {
+      params: { prompt: msg, model: "perplexity-reasoning", user: uid + "_p" },
+      timeout: 20000
+    }).then(function(r) {
+      if (!r.data || !r.data.data) return null;
+      let reply = r.data.data;
+      // Strip any Perplexity self-identification lines
+      reply = reply.replace(/I'?m\s+Perplexity[\s\S]*?\./gi, "");
+      reply = reply.replace(/As\s+Perplexity[\s\S]*?\./gi, "");
+      reply = reply.replace(/Perplexity\s+AI[\s\S]*?\./gi, "");
+      reply = reply.replace(/trained by Perplexity[\s\S]*?\./gi, "");
+      reply = reply.replace(/I am a search assistant[\s\S]*?\./gi, "");
+      reply = reply.replace(/I can't adopt[\s\S]*?\./gi, "");
+      reply = reply.replace(/I need to clarify[\s\S]*?\./gi, "");
+      return reply.trim() || null;
+    });
+  }
+},
   {
     key: "mistral", name: "Mistral",
     call: function(uid, msg, sys) {
