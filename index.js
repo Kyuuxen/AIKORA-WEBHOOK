@@ -97,26 +97,28 @@ const AI_MODELS = [
       timeout: 20000
     }).then(function(r) {
       if (!r.data || !r.data.data) return null;
-      let reply = r.data.data;
-      // Strip Perplexity self-identification
-reply = reply.replace(/I'?m\s+\*?\*?Perplexity\*?\*?[\s\S]*?\./gi, "");
-reply = reply.replace(/As\s+\*?\*?Perplexity\*?\*?[\s\S]*?\./gi, "");
-reply = reply.replace(/trained by Perplexity[\s\S]*?\./gi, "");
-reply = reply.replace(/I can't adopt[\s\S]*?\./gi, "");
-reply = reply.replace(/I need to clarify[\s\S]*?\./gi, "");
-reply = reply.replace(/I am a search assistant[\s\S]*?\./gi, "");
-reply = reply.replace(/However, if you'?re interested[\s\S]*?\./gi, "");
-reply = reply.replace(/Is there something specific[\s\S]*?\?/gi, "");
-
-// Strip ALL markdown formatting
-reply = reply.replace(/\*\*(.+?)\*\*/g, "$1");   // **bold** → bold
-reply = reply.replace(/\*(.+?)\*/g, "$1");         // *italic* → italic
-reply = reply.replace(/\_\_(.+?)\_\_/g, "$1");     // __bold__ → bold
-reply = reply.replace(/\_(.+?)\_/g, "$1");         // _italic_ → italic
-reply = reply.replace(/\[(\d+)\]/g, "");           // citation [1][2] → removed
-reply = reply.replace(/#{1,6}\s/g, "");            // # headers → removed
-reply = reply.replace(/`(.+?)`/g, "$1");           // `code` → code
-reply = reply.replace(/\n{3,}/g, "\n\n");          // triple newlines → double
+      var reply = r.data.data;
+      var lines = reply.split("\n");
+      var clean = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var low = line.toLowerCase();
+        if (low.indexOf("perplexity") !== -1) continue;
+        if (low.indexOf("search assistant") !== -1) continue;
+        if (low.indexOf("trained by") !== -1) continue;
+        if (low.indexOf("i can't adopt") !== -1) continue;
+        if (low.indexOf("i need to clarify") !== -1) continue;
+        if (low.indexOf("roleplay") !== -1) continue;
+        line = line.replace(/\*\*/g, "");
+        line = line.replace(/\*/g, "");
+        line = line.replace(/\[(\d+)\]/g, "");
+        line = line.replace(/^#{1,6}\s/, "");
+        clean.push(line);
+      }
+      var result = clean.join("\n").trim();
+      return result || null;
+    });
+  }
 },
   {
     key: "mistral", name: "Mistral",
