@@ -248,8 +248,18 @@ function startAutoNews() {
 startAutoNews();
 
 // ── Command handler ───────────────────────────────────────────────────────────
-module.exports.run = async function ({ api, args }) {
+module.exports.run = async function ({ api, args, event }) {
+  const uid    = event.senderId;
+  const ADMINS = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
+  const isAdmin = ADMINS.length === 0 || ADMINS.includes(uid);
+
   const action = args[0] ? args[0].toLowerCase() : "status";
+
+  // Status is public — anyone can check
+  // All other actions are admin only
+  if (action !== "status" && !isAdmin) {
+    return api.send("⛔ This command is for admins only!");
+  }
 
   if (action === "status") {
     const dbSizeBytes = fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).size : 0;
