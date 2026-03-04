@@ -1,178 +1,304 @@
 const axios = require("axios");
+const fs    = require("fs");
+const path  = require("path");
+const crypto = require("crypto");
 
 module.exports.config = {
-  name: "autonews",
+  name:        "autonews",
   description: "Auto post news with images to Facebook Page every 15 minutes",
-  usage: "!autonews on | off | status | test",
-  category: "Automation",
+  usage:       "!autonews on | off | status | test | reset",
+  category:    "Automation",
 };
 
+// ── Persistent storage ────────────────────────────────────────────────────────
+// Stores URL hashes instead of full URLs
+// A hash is only 8 characters vs 100+ for a full URL
+// This means 1MB of storage = ~125,000 articles remembered (practically unlimited)
+const DB_FILE = path.join(__dirname, ".autonews_db.json");
+
+function hashUrl(url) {
+  return crypto.createHash("md5").update(url).digest("hex").substring(0, 8);
+}
+
+function loadDB() {
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      const raw  = fs.readFileSync(DB_FILE, "utf8");
+      const data = JSON.parse(raw);
+      return {
+        hashes:      new Set(data.hashes || []),
+        totalPosted: data.totalPosted  || 0,
+        lastPosted:  data.lastPosted   || null,
+        startedAt:   data.startedAt    || new Date().toISOString(),
+      };
+    }
+  } catch (e) {
+    console.log("[AutoNews] DB load error:", e.message);
+  }
+  return {
+    hashes:      new Set(),
+    totalPosted: 0,
+    lastPosted:  null,
+    startedAt:   new Date().toISOString(),
+  };
+}
+
+function saveDB(db) {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify({
+      hashes:      Array.from(db.hashes), // unlimited — no slice
+      totalPosted: db.totalPosted,
+      lastPosted:  db.lastPosted,
+      startedAt:   db.startedAt,
+    }, null, 2), "utf8");
+  } catch (e) {
+    console.log("[AutoNews] DB save error:", e.message);
+  }
+}
+
+function isPosted(url) {
+  return db.hashes.has(hashUrl(url));
+}
+
+function markPosted(url) {
+  db.hashes.add(hashUrl(url));
+  db.totalPosted++;
+  db.lastPosted = new Date().toISOString();
+  saveDB(db);
+}
+
+const db = loadDB();
+console.log("[AutoNews] DB loaded — " + db.hashes.size + " articles remembered (" + db.totalPosted + " total posted)");
+
 // ── State ─────────────────────────────────────────────────────────────────────
-let interval   = null;
-let postedUrls = new Set();
+let interval  = null;
+let isPosting = false;
 
 // ── Fetch news ────────────────────────────────────────────────────────────────
 async function getNews() {
+  // Try GNews
   try {
     const res = await axios.get("https://gnews.io/api/v4/top-headlines", {
       params: {
-        lang:   "en",
-        country:"ph",
-        max:    10,
-        apikey: process.env.GNEWS_API_KEY || "demo",
+        lang:    "en",
+        country: "ph",
+        max:     20,
+        apikey:  process.env.GNEWS_API_KEY || "demo",
       },
       timeout: 15000,
     });
-    return res.data?.articles || [];
-  } catch (err) {
-    try {
-      const rss = await axios.get(
-        "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml",
-        { timeout: 15000 }
-      );
-      return (rss.data?.items || []).map(item => ({
-        title:       item.title,
-        description: item.description?.replace(/<[^>]*>/g, "").substring(0, 200),
-        url:         item.link,
-        image:       item.enclosure?.link || item.thumbnail || null,
-        source:      { name: "BBC News" },
-      }));
-    } catch (e) {
-      return [];
+    const articles = res.data && res.data.articles ? res.data.articles : [];
+    if (articles.length > 0) {
+      console.log("[AutoNews] GNews returned " + articles.length + " articles");
+      return articles;
     }
+  } catch (err) {
+    console.log("[AutoNews] GNews failed:", err.message);
+  }
+
+  // Fallback BBC RSS
+  try {
+    const rss = await axios.get(
+      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml",
+      { timeout: 15000 }
+    );
+    const items = rss.data && rss.data.items ? rss.data.items : [];
+    console.log("[AutoNews] BBC RSS returned " + items.length + " articles");
+    return items.map(function(item) {
+      return {
+        title:       item.title,
+        description: item.description ? item.description.replace(/<[^>]*>/g, "").substring(0, 200) : "",
+        url:         item.link,
+        image:       (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail || null),
+        source:      { name: "BBC News" },
+      };
+    });
+  } catch (e) {
+    console.log("[AutoNews] BBC RSS failed:", e.message);
+    return [];
   }
 }
 
-// ── Rewrite using Copilot AI ──────────────────────────────────────────────────
-async function rewriteWithCopilot(text) {
+// ── Rewrite with AI ───────────────────────────────────────────────────────────
+async function rewriteWithAI(text) {
   try {
     const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
       params: {
-        prompt: `Rewrite this as a short engaging Facebook news post (max 3 sentences, no hashtags):\n\n${text}`,
+        prompt: "Rewrite this as a short engaging Facebook news post (max 3 sentences, no hashtags, no markdown, no asterisks):\n\n" + text,
       },
       timeout: 30000,
     });
-    return res.data?.data?.text || text;
-  } catch {
-    return text;
+    const result = res.data && res.data.data && res.data.data.text ? res.data.data.text : null;
+    if (result) return result;
+  } catch (e) {
+    console.log("[AutoNews] AI rewrite failed:", e.message);
   }
+  return text;
 }
 
-// ── Generate headline card image ──────────────────────────────────────────────
-// Uses a free OG image generation service to create a news card with title overlay
+// ── Headline image ────────────────────────────────────────────────────────────
 function makeHeadlineImage(title, source) {
   const t = encodeURIComponent(title.substring(0, 80));
   const s = encodeURIComponent(source || "AIKORA NEWS");
-  // Free service that generates a dark news card image with title text
-  return `https://og.tailgraph.com/og?fontFamily=Roboto&title=${t}&titleTailwind=text-white+text-4xl+font-bold&text=${s}&textTailwind=text-white+text-xl+mt-2&logoTailwind=h-8&bgTailwind=bg-gray-900&footer=AIKORA+NEWS&footerTailwind=text-gray-400`;
+  return "https://og.tailgraph.com/og?fontFamily=Roboto&title=" + t + "&titleTailwind=text-white+text-4xl+font-bold&text=" + s + "&textTailwind=text-white+text-xl+mt-2&bgTailwind=bg-gray-900&footer=AIKORA+NEWS&footerTailwind=text-gray-400";
 }
 
-// ── Post photo to Facebook Page ───────────────────────────────────────────────
+// ── Post to Facebook ──────────────────────────────────────────────────────────
 async function postToFacebook(caption, imageUrl, articleUrl) {
   const pageId    = process.env.PAGE_ID;
   const feedToken = process.env.PAGE_FEED_TOKEN;
-
   if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
 
-  const fullCaption = caption + (articleUrl ? `\n\n🔗 Read more: ${articleUrl}` : "");
+  const fullCaption = caption + (articleUrl ? "\n\n🔗 Read more: " + articleUrl : "");
 
-  // Method 1: Post as photo (shows image with caption — like Rappler style)
   if (imageUrl) {
     try {
       await axios.post(
-        `https://graph.facebook.com/v19.0/${pageId}/photos`,
-        {
-          url:          imageUrl,
-          caption:      fullCaption,
-          access_token: feedToken,
-        },
+        "https://graph.facebook.com/v19.0/" + pageId + "/photos",
+        { url: imageUrl, caption: fullCaption, access_token: feedToken },
         { timeout: 20000 }
       );
       return "photo";
-    } catch (photoErr) {
-      console.log("Photo post failed, falling back to link post:", photoErr.response?.data?.error?.message);
-      // Fall through to link post
+    } catch (e) {
+      console.log("[AutoNews] Photo post failed, trying link:", e.response && e.response.data && e.response.data.error ? e.response.data.error.message : e.message);
     }
   }
 
-  // Method 2: Post as link (Facebook auto-generates a preview card with image)
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v19.0/${pageId}/feed`,
-      {
-        message:      caption,
-        link:         articleUrl || undefined,
-        access_token: feedToken,
-      },
-      { timeout: 15000 }
-    );
-    return "link";
-  } catch (err) {
-    const fbError = err.response?.data?.error;
-    throw new Error(fbError ? `Facebook Error ${fbError.code}: ${fbError.message}` : err.message);
-  }
+  await axios.post(
+    "https://graph.facebook.com/v19.0/" + pageId + "/feed",
+    { message: caption, link: articleUrl || undefined, access_token: feedToken },
+    { timeout: 15000 }
+  );
+  return "link";
 }
 
-// ── Main auto-post logic ──────────────────────────────────────────────────────
+// ── Pick unposted article ─────────────────────────────────────────────────────
+function pickArticle(articles) {
+  for (let i = 0; i < articles.length; i++) {
+    const a = articles[i];
+    if (!a.url) continue;
+    if (!isPosted(a.url)) return a;
+  }
+  return null;
+}
+
+// ── Main post logic ───────────────────────────────────────────────────────────
 async function autoPost(notifyFn) {
-  try {
-    const articles = await getNews();
-    if (!articles.length) return notifyFn("⚠️ No news articles found.");
-
-    const article = articles.find(a => !postedUrls.has(a.url));
-    if (!article) {
-      postedUrls.clear();
-      return notifyFn("🔄 All recent news posted. Resetting list...");
-    }
-
-    postedUrls.add(article.url);
-
-    const source     = article.source?.name || "News";
-    const rawContent = `${article.title}\n\n${article.description || ""}`;
-    const finalPost  = await rewriteWithCopilot(rawContent);
-
-    // Use article's own image, or generate a headline card
-    const imageUrl = article.image || article.urlToImage || makeHeadlineImage(article.title, source);
-
-    const method = await postToFacebook(finalPost, imageUrl, article.url);
-    notifyFn(`✅ Posted (${method}): ${article.title}`);
-
-  } catch (err) {
-    notifyFn(`❌ Auto-post failed: ${err.message}`);
-    console.error("autoPost error:", err.message);
-  }
-}
-
-// ── Auto starter ──────────────────────────────────────────────────────────────
-function startAutoNews() {
-  if (interval) return;
-
-  if (!process.env.PAGE_ID || !process.env.PAGE_FEED_TOKEN) {
-    console.log("❌ AutoNews not started: Missing PAGE_ID or PAGE_FEED_TOKEN.");
+  if (isPosting) {
+    notifyFn("⏳ Still posting previous article, skipping...");
     return;
   }
 
-  console.log("🚀 AutoNews started automatically...");
+  isPosting = true;
+  try {
+    const articles = await getNews();
+    if (!articles.length) {
+      notifyFn("⚠️ No news articles found from any source.");
+      return;
+    }
 
-  // First post immediately
-  autoPost((msg) => console.log("[AutoNews]", msg));
+    let article = pickArticle(articles);
 
-  // Then repeat every 15 minutes
-  interval = setInterval(() => {
-    autoPost((msg) => console.log("[AutoNews]", msg));
+    // All current batch already posted — this is normal, just wait for new articles
+    if (!article) {
+      notifyFn("ℹ️ All " + articles.length + " current articles already posted. Waiting for new news...");
+      return;
+    }
+
+    // Mark posted BEFORE posting to prevent duplicates
+    markPosted(article.url);
+
+    const source     = article.source && article.source.name ? article.source.name : "News";
+    const rawContent = article.title + "\n\n" + (article.description || "");
+    const finalPost  = await rewriteWithAI(rawContent);
+    const imageUrl   = article.image || article.urlToImage || makeHeadlineImage(article.title, source);
+
+    const method = await postToFacebook(finalPost, imageUrl, article.url);
+    notifyFn("✅ Posted (" + method + "): " + article.title);
+
+  } catch (err) {
+    notifyFn("❌ Auto-post failed: " + err.message);
+    console.error("[AutoNews] Error:", err.message);
+  } finally {
+    isPosting = false;
+  }
+}
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+function startAutoNews() {
+  if (interval) return;
+  if (!process.env.PAGE_ID || !process.env.PAGE_FEED_TOKEN) {
+    console.log("[AutoNews] Not started: Missing PAGE_ID or PAGE_FEED_TOKEN.");
+    return;
+  }
+
+  console.log("[AutoNews] Starting... " + db.hashes.size + " URLs remembered.");
+
+  // First post after 30 seconds
+  setTimeout(function() {
+    autoPost(function(msg) { console.log("[AutoNews]", msg); });
+  }, 30000);
+
+  // Every 15 minutes
+  interval = setInterval(function() {
+    autoPost(function(msg) { console.log("[AutoNews]", msg); });
   }, 15 * 60 * 1000);
 }
 
-// Start automatically when file loads
 startAutoNews();
 
+// ── Command handler ───────────────────────────────────────────────────────────
+module.exports.run = async function ({ api, args }) {
+  const action = args[0] ? args[0].toLowerCase() : "status";
 
-// ── Optional: Keep command only for status (optional) ─────────────────────────
-module.exports.run = async function ({ api }) {
-  return api.send(
-    `📊 Auto News Status\n` +
-    `━━━━━━━━━━━━━━\n` +
-    `Status: ${interval ? "🟢 Running" : "🔴 Stopped"}\n` +
-    `Articles posted: ${postedUrls.size}`
+  if (action === "status") {
+    const dbSizeBytes = fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).size : 0;
+    const dbSizeKB    = (dbSizeBytes / 1024).toFixed(1);
+    return api.send(
+      "📰 AutoNews Status\n" +
+      "━━━━━━━━━━━━━━\n" +
+      "Status: "        + (interval ? "🟢 Running" : "🔴 Stopped") + "\n" +
+      "Articles remembered: " + db.hashes.size + " (unlimited)\n" +
+      "Total ever posted: "   + db.totalPosted  + "\n" +
+      "DB file size: "        + dbSizeKB + " KB\n" +
+      "Last posted: "         + (db.lastPosted ? new Date(db.lastPosted).toLocaleString() : "Never") + "\n" +
+      "Running since: "       + (db.startedAt ? new Date(db.startedAt).toLocaleString() : "Unknown")
+    );
+  }
+
+  if (action === "test") {
+    api.send("🧪 Posting a test article now...");
+    await autoPost(function(msg) { api.send(msg); });
+    return;
+  }
+
+  if (action === "reset") {
+    const count = db.hashes.size;
+    db.hashes.clear();
+    saveDB(db);
+    return api.send("🔄 Cleared " + count + " remembered URLs. Fresh start next post!");
+  }
+
+  if (action === "on") {
+    if (interval) return api.send("✅ AutoNews is already running!");
+    startAutoNews();
+    return api.send("✅ AutoNews started!");
+  }
+
+  if (action === "off") {
+    if (!interval) return api.send("🔴 AutoNews is already stopped!");
+    clearInterval(interval);
+    interval = null;
+    return api.send("🔴 AutoNews stopped.");
+  }
+
+  api.send(
+    "📰 AutoNews Commands\n" +
+    "━━━━━━━━━━━━━━\n" +
+    "!autonews status — Check status + DB size\n" +
+    "!autonews test   — Post now\n" +
+    "!autonews reset  — Clear history\n" +
+    "!autonews on     — Start\n" +
+    "!autonews off    — Stop"
   );
 };
