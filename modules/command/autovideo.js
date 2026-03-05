@@ -34,7 +34,7 @@ function safeText(str) {
   return String(str)
     .replace(/['"\\:[\]]/g, " ")
     .replace(/[^\x20-\x7E]/g, "")
-    .substring(0, 50)
+    .substring(0, 35)
     .trim();
 }
 
