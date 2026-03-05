@@ -31,11 +31,35 @@ if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 
 // ── Safe text ─────────────────────────────────────────────────────────────────
 function safeText(str) {
-  return String(str)
+  const text = String(str)
     .replace(/['"\\:[\]]/g, " ")
     .replace(/[^\x20-\x7E]/g, "")
-    .substring(0, 35)
     .trim();
+  return text.length > 15 ? text.substring(0, 15) + "..." : text;
+}
+
+// ── Rewrite headline via Copilot ───────────────────────────────────────────────
+async function rewriteHeadline(title) {
+  try {
+    const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
+      params: {
+        prompt:
+          "Rewrite this news headline in VERY SHORT form (max 5 words): " + title
+      },
+      timeout: 15000
+    });
+
+    const txt =
+      res.data &&
+      res.data.data &&
+      res.data.data.text
+        ? res.data.data.text
+        : null;
+
+    if (txt) return safeText(txt.replace(/\*/g, "").trim());
+  } catch (e) {}
+
+  return safeText(title);
 }
 
 // ── Download file ─────────────────────────────────────────────────────────────
@@ -50,7 +74,6 @@ async function downloadFile(url, dest) {
 
 // ── Get one good image ────────────────────────────────────────────────────────
 async function getImage(article) {
-  // Try Pexels
   const pexelsKey = process.env.PEXELS_API_KEY;
   if (pexelsKey) {
     try {
@@ -64,16 +87,13 @@ async function getImage(article) {
       if (photos.length > 0) return photos[0].src.large;
     } catch(e) {}
   }
-  // Try article image
   if (article.image || article.urlToImage) return article.image || article.urlToImage;
-  // Fallback: generate headline card image
   const t = encodeURIComponent(safeText(article.title));
   return "https://og.tailgraph.com/og?fontFamily=Roboto&title=" + t +
     "&titleTailwind=text-white+text-4xl+font-bold&bgTailwind=bg-gray-900&footer=AIKORA+NEWS&footerTailwind=text-gray-400";
 }
 
 // ── Generate video using SINGLE image + ffmpeg (ultra fast) ───────────────────
-// Strategy: 1 image + text overlay + music = simple, fast, under 30 seconds
 async function generateVideo(article, imageUrl, musicPath, logoPath) {
   const outPath  = path.join(TMP_DIR, "output.mp4");
   if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
@@ -82,7 +102,6 @@ async function generateVideo(article, imageUrl, musicPath, logoPath) {
   const source   = safeText((article.source && article.source.name) ? article.source.name : "NEWS").toUpperCase();
   const dateStr  = safeText(new Date().toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" }));
 
-  // Download and convert image
   const rawImg = path.join(TMP_DIR, "bg_raw.jpg");
   const bgImg  = path.join(TMP_DIR, "bg.jpg");
   try {
@@ -92,93 +111,38 @@ async function generateVideo(article, imageUrl, musicPath, logoPath) {
       { timeout: 20000 }
     );
   } catch(e) {
-    // Create plain dark background if image fails
     await execAsync(
       'ffmpeg -y -f lavfi -i "color=c=0x1a1a2e:size=640x360:rate=1" -frames:v 1 "' + bgImg + '"',
       { timeout: 10000 }
     );
   }
 
-  // Lower third positions for 360p
   const barY  = 265;
   const lineY = 263;
   const t1Y   = 273;
   const t2Y   = 295;
 
   const drawText = [
-  // background bar
-  "drawbox=x=0:y=" + barY + ":w=640:h=95:color=black@0.85:t=fill",
+    "drawbox=x=0:y=" + barY  + ":w=640:h=95:color=black@0.85:t=fill",
+    "drawbox=x=0:y=" + lineY + ":w=640:h=4:color=red:t=fill",
+    "drawtext=text='" + PAGE_NAME + "':fontcolor=red:fontsize=20:x=10:y=" + t1Y,
+    "drawtext=text='" + dateStr   + "':fontcolor=white@0.7:fontsize=16:x=w-tw-10:y=" + t1Y,
+    "drawtext=text='" + headline  + "':fontcolor=white:fontsize=26:x=10:y=" + t2Y,
+    "drawtext=text='" + source    + "':fontcolor=yellow:fontsize=18:x=w-tw-10:y=" + t2Y
+  ].join(",");
 
-  // red line
-  "drawbox=x=0:y=" + lineY + ":w=640:h=4:color=red:t=fill",
-
-  // page name (bigger)
-  "drawtext=text='" + PAGE_NAME + "':fontcolor=red:fontsize=20:x=10:y=" + t1Y,
-
-  // date
-  "drawtext=text='" + dateStr + "':fontcolor=white@0.7:fontsize=16:x=w-tw-10:y=" + t1Y,
-
-  // headline (biggest text)
-  "drawtext=text='" + headline + "':fontcolor=white:fontsize=26:x=10:y=" + t2Y,
-
-  // news source
-  "drawtext=text='" + source + "':fontcolor=yellow:fontsize=18:x=w-tw-10:y=" + t2Y
-].join(",");
-
-  // Build inputs and filter
-  let inputs     = '-loop 1 -t 15 -i "' + bgImg + '"'; // 15 seconds only!
-  let inputIdx   = 1;
-  let baseStream = "0:v";
-  let filters    = [];
-
-  if (logoPath && fs.existsSync(logoPath)) {
-    // Resize logo small
-    const smallLogo = path.join(TMP_DIR, "slogo.png");
-    try {
-      await execAsync('ffmpeg -y -i "' + logoPath + '" -vf "scale=60:60:force_original_aspect_ratio=decrease" "' + smallLogo + '"', { timeout: 10000 });
-      inputs += ' -i "' + smallLogo + '"';
-      filters.push("[" + baseStream + "][" + inputIdx + ":v]overlay=10:10:format=auto[logoout]");
-      baseStream = "logoout";
-      inputIdx++;
-    } catch(e) {}
-  }
-
-  filters.push("[" + baseStream + "]" + drawText + ",[0:v]fps=10,format=yuv420p[final]");
-
-  // Simpler approach - just apply drawtext directly without complex filter
   let cmd;
   if (musicPath && fs.existsSync(musicPath)) {
-    cmd = 'ffmpeg -y -loop 1 -t 15 -i "' + bgImg + '" -i "' + musicPath + '" ';
-    if (logoPath && fs.existsSync(logoPath)) {
-      const smallLogo = path.join(TMP_DIR, "slogo.png");
-      if (fs.existsSync(smallLogo)) {
-        cmd += '-i "' + smallLogo + '" ';
-        cmd += '-filter_complex "[0:v][2:v]overlay=10:10:format=auto[bg];[bg]' + drawText + ',fps=10,format=yuv420p[final]" ';
-        cmd += '-map "[final]" -map 1:a ';
-      } else {
-        cmd += '-vf "' + drawText + ',fps=10,format=yuv420p" ';
-      }
-    } else {
-      cmd += '-vf "' + drawText + ',fps=10,format=yuv420p" ';
-    }
-    cmd += '-c:v libx264 -preset ultrafast -crf 32 ';
-    cmd += '-c:a aac -b:a 64k -filter:a "volume=0.2" ';
-    cmd += '-t 15 -shortest ';
+    cmd = 'ffmpeg -y -loop 1 -t 15 -i "' + bgImg + '" -i "' + musicPath + '" -vf "' + drawText + ',fps=10,format=yuv420p" -c:v libx264 -preset ultrafast -crf 32 -c:a aac -b:a 64k -filter:a "volume=0.2" -t 15 -shortest "' + outPath + '"';
   } else {
-    cmd = 'ffmpeg -y -loop 1 -t 15 -i "' + bgImg + '" ';
-    cmd += '-vf "' + drawText + ',fps=10,format=yuv420p" ';
-    cmd += '-c:v libx264 -preset ultrafast -crf 32 ';
-    cmd += '-t 15 -an ';
+    cmd = 'ffmpeg -y -loop 1 -t 15 -i "' + bgImg + '" -vf "' + drawText + ',fps=10,format=yuv420p" -c:v libx264 -preset ultrafast -crf 32 -t 15 -an "' + outPath + '"';
   }
 
-  cmd += '"' + outPath + '"';
-
   console.log("[AutoVideo] Rendering 15s video...");
-  await execAsync(cmd, { timeout: 60000, maxBuffer: 20 * 1024 * 1024 }); // 1 min max
+  await execAsync(cmd, { timeout: 60000, maxBuffer: 20 * 1024 * 1024 });
 
   if (!fs.existsSync(outPath)) throw new Error("Output not created");
-  const mb = (fs.statSync(outPath).size / 1024 / 1024).toFixed(1);
-  console.log("[AutoVideo] Done: " + mb + "MB");
+  console.log("[AutoVideo] Done: " + (fs.statSync(outPath).size / 1024 / 1024).toFixed(1) + "MB");
   return outPath;
 }
 
@@ -189,107 +153,23 @@ async function uploadToFacebook(filePath, title, caption) {
   if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
 
   const fileSize = fs.statSync(filePath).size;
-  console.log("[AutoVideo] File size: " + (fileSize/1024/1024).toFixed(2) + "MB");
+  if (fileSize < 1024) throw new Error("Video file too small: " + fileSize + " bytes");
 
-  if (fileSize < 1024) throw new Error("Video file too small: " + fileSize + " bytes - ffmpeg likely failed");
+  const FormData = require("form-data");
+  const form     = new FormData();
+  form.append("title",        title.substring(0, 100));
+  form.append("description",  caption.substring(0, 500));
+  form.append("access_token", feedToken);
+  form.append("source",       fs.createReadStream(filePath), { filename: "video.mp4", contentType: "video/mp4" });
 
-  // Method 1: Simple single POST upload (works for files under 1GB)
-  try {
-    const FormData = require("form-data");
-    const form     = new FormData();
-    form.append("title",        title.substring(0, 100));
-    form.append("description",  caption.substring(0, 500));
-    form.append("access_token", feedToken);
-    form.append("source",       fs.createReadStream(filePath), {
-      filename:    "video.mp4",
-      contentType: "video/mp4",
-    });
+  const res = await axios.post("https://graph-video.facebook.com/v19.0/" + pageId + "/videos", form, {
+    headers: form.getHeaders(),
+    timeout: 120000,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity
+  });
 
-    const res = await axios.post(
-      "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
-      form,
-      {
-        headers: form.getHeaders(),
-        timeout: 120000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-      }
-    );
-    console.log("[AutoVideo] Upload complete! Video ID:", res.data.id || "unknown");
-    return;
-  } catch (e) {
-    const fbErr = e.response && e.response.data ? JSON.stringify(e.response.data) : e.message;
-    console.log("[AutoVideo] Simple upload failed:", fbErr, "- trying chunked...");
-  }
-
-  // Method 2: Chunked upload fallback
-  console.log("[AutoVideo] Trying chunked upload...");
-  const initRes = await axios.post(
-    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
-    null,
-    {
-      params: {
-        upload_phase:  "start",
-        file_size:     fileSize,
-        access_token:  feedToken,
-      },
-      timeout: 30000,
-    }
-  );
-
-  if (!initRes.data || !initRes.data.upload_session_id) {
-    throw new Error("Failed to start upload session: " + JSON.stringify(initRes.data));
-  }
-
-  const sessionId = initRes.data.upload_session_id;
-  console.log("[AutoVideo] Session:", sessionId);
-
-  const CHUNK  = 3 * 1024 * 1024;
-  const buffer = fs.readFileSync(filePath);
-  let offset   = 0;
-
-  while (offset < fileSize) {
-    const end      = Math.min(offset + CHUNK, fileSize);
-    const chunk    = buffer.slice(offset, end);
-    const chunkRes = await axios.post(
-      "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
-      chunk,
-      {
-        params: {
-          upload_phase:      "transfer",
-          upload_session_id: sessionId,
-          start_offset:      offset,
-          access_token:      feedToken,
-        },
-        headers: {
-          "Content-Type":   "application/octet-stream",
-          "Content-Length": chunk.length,
-        },
-        timeout: 60000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-      }
-    );
-    const nextOffset = parseInt(chunkRes.data && chunkRes.data.start_offset);
-    offset = isNaN(nextOffset) ? end : nextOffset;
-    console.log("[AutoVideo] Upload: " + Math.round((offset/fileSize)*100) + "%");
-  }
-
-  const finishRes = await axios.post(
-    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
-    null,
-    {
-      params: {
-        upload_phase:      "finish",
-        upload_session_id: sessionId,
-        title:             title.substring(0, 100),
-        description:       caption.substring(0, 500),
-        access_token:      feedToken,
-      },
-      timeout: 60000,
-    }
-  );
-  console.log("[AutoVideo] Chunked upload complete!", JSON.stringify(finishRes.data));
+  console.log("[AutoVideo] Upload complete! Video ID:", res.data.id || "unknown");
 }
 
 // ── Fetch news ────────────────────────────────────────────────────────────────
@@ -302,18 +182,13 @@ async function fetchNews() {
     return (res.data && res.data.articles) ? res.data.articles : [];
   } catch(e) {}
   try {
-    const res = await axios.get(
-      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml",
-      { timeout: 15000 }
-    );
-    return ((res.data && res.data.items) ? res.data.items : []).map(function(item) {
-      return {
-        title:  item.title,
-        url:    item.link,
-        image:  (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail||null),
-        source: { name: "BBC News" },
-      };
-    });
+    const res = await axios.get("https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml", { timeout: 15000 });
+    return ((res.data && res.data.items) ? res.data.items : []).map(item => ({
+      title: item.title,
+      url:   item.link,
+      image: (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail||null),
+      source: { name: "BBC News" },
+    }));
   } catch(e) { return []; }
 }
 
@@ -321,19 +196,13 @@ async function fetchNews() {
 async function getLogo() {
   const logoPath = path.join(TMP_DIR, "logo.png");
   if (fs.existsSync(logoPath)) return logoPath;
-  try {
-    await downloadFile(LOGO_URL, logoPath);
-    return logoPath;
-  } catch(e) { return null; }
+  try { await downloadFile(LOGO_URL, logoPath); return logoPath; } catch(e) { return null; }
 }
 
 // ── Get music ─────────────────────────────────────────────────────────────────
 async function getMusic() {
   const musicPath = path.join(TMP_DIR, "music.mp3");
-  try {
-    await downloadFile("https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", musicPath);
-    return musicPath;
-  } catch(e) { return null; }
+  try { await downloadFile("https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", musicPath); return musicPath; } catch(e) { return null; }
 }
 
 // ── Generate caption ──────────────────────────────────────────────────────────
@@ -352,10 +221,8 @@ async function generateCaption(article) {
 // ── Cleanup ───────────────────────────────────────────────────────────────────
 function cleanTmp() {
   try {
-    fs.readdirSync(TMP_DIR).forEach(function(f) {
-      if (f !== "logo.png" && f !== "music.mp3") {
-        try { fs.unlinkSync(path.join(TMP_DIR, f)); } catch(e) {}
-      }
+    fs.readdirSync(TMP_DIR).forEach(f => {
+      if (f !== "logo.png" && f !== "music.mp3") try { fs.unlinkSync(path.join(TMP_DIR, f)); } catch(e) {}
     });
   } catch(e) {}
 }
@@ -375,6 +242,9 @@ async function autoPost(notifyFn) {
     }
     if (!article) { state.postedUrls.clear(); article = articles[0]; }
     state.postedUrls.add(article.url);
+
+    // Rewrite headline short with Copilot
+    article.title = await rewriteHeadline(article.title);
 
     notifyFn("📰 Generating: " + article.title + "\n⏳ ~30 seconds...");
 
@@ -409,8 +279,8 @@ function startAutoVideo() {
     return;
   }
   console.log("[AutoVideo] Starting...");
-  setTimeout(function() { autoPost(function(m){ console.log("[AutoVideo]", m); }); }, 5 * 60 * 1000);
-  state.interval = setInterval(function() { autoPost(function(m){ console.log("[AutoVideo]", m); }); }, 60 * 60 * 1000);
+  setTimeout(() => { autoPost(m => console.log("[AutoVideo]", m)); }, 5 * 60 * 1000);
+  state.interval = setInterval(() => { autoPost(m => console.log("[AutoVideo]", m)); }, 60 * 60 * 1000);
 }
 
 startAutoVideo();
@@ -418,7 +288,7 @@ startAutoVideo();
 // ── Command ───────────────────────────────────────────────────────────────────
 module.exports.run = async function ({ api, args, event }) {
   const uid     = event.senderId;
-  const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id){ return id.trim(); }).filter(Boolean);
+  const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(id => id.trim()).filter(Boolean);
   const isAdmin = ADMINS.length === 0 || ADMINS.includes(uid);
 
   if (!isAdmin) return api.send("⛔ Admins only!");
@@ -439,7 +309,7 @@ module.exports.run = async function ({ api, args, event }) {
   }
   if (action === "test") {
     api.send("🎬 Generating video...\n⏳ ~30 seconds...");
-    await autoPost(function(msg) { api.send(msg); });
+    await autoPost(msg => api.send(msg));
     return;
   }
   if (action === "on") {
