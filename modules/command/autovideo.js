@@ -23,26 +23,26 @@ if (!global.autoVideoState) {
 }
 const state = global.autoVideoState;
 
-const TMP_DIR  = "/tmp/autovideo";
-const LOGO_URL = "https://i.ibb.co/nxXsv5M/file-000000000e907206aa347a1de1d8d10a.png";
+const TMP_DIR   = "/tmp/autovideo";
+const LOGO_URL  = "https://i.ibb.co/nxXsv5M/file-000000000e907206aa347a1de1d8d10a.png";
 const PAGE_NAME = "AIKORA NEWS";
-const VIDEO_DUR = 60;
-const SLIDE_DUR = 5;
-const IMG_COUNT = Math.floor(VIDEO_DUR / SLIDE_DUR);
+
+// ── Reduced settings for speed ────────────────────────────────────────────────
+const WIDTH     = 854;   // 480p width (faster than 720p)
+const HEIGHT    = 480;   // 480p height
+const FPS       = 15;    // lower fps = faster render
+const VIDEO_DUR = 30;    // 30 seconds (was 60 - half the render time)
+const SLIDE_DUR = 5;     // 5 seconds per image
+const IMG_COUNT = 6;     // 6 images only
 
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 
-// ── Safe text for ffmpeg drawtext (remove all special chars) ──────────────────
+// ── Safe text for ffmpeg drawtext ─────────────────────────────────────────────
 function safeText(str) {
   return String(str)
-    .replace(/'/g, " ")
-    .replace(/"/g, " ")
-    .replace(/\\/g, " ")
-    .replace(/:/g, "-")
-    .replace(/\[/g, "(")
-    .replace(/\]/g, ")")
-    .replace(/[^\x20-\x7E]/g, "") // ASCII only
-    .substring(0, 60)
+    .replace(/['"\\:[\]]/g, " ")
+    .replace(/[^\x20-\x7E]/g, "")
+    .substring(0, 55)
     .trim();
 }
 
@@ -50,72 +50,71 @@ function safeText(str) {
 async function downloadFile(url, dest) {
   const res = await axios.get(url, {
     responseType: "arraybuffer",
-    timeout: 30000,
+    timeout: 20000,
     headers: { "User-Agent": "Mozilla/5.0" },
   });
   fs.writeFileSync(dest, Buffer.from(res.data));
 }
 
-// ── Convert ANY image format to proper 1280x720 jpg using ffmpeg ──────────────
+// ── Convert image to proper jpg at target resolution ──────────────────────────
 async function toJpg(srcPath, destPath) {
   await execAsync(
     'ffmpeg -y -i "' + srcPath + '" ' +
-    '-vf "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,format=yuv420p" ' +
-    '-q:v 2 "' + destPath + '"',
-    { timeout: 30000 }
+    '-vf "scale=' + WIDTH + ':' + HEIGHT + ':force_original_aspect_ratio=increase,' +
+    'crop=' + WIDTH + ':' + HEIGHT + ',format=yuv420p" ' +
+    '-q:v 3 "' + destPath + '"',
+    { timeout: 20000 }
   );
-  return destPath;
 }
 
 // ── Get images ────────────────────────────────────────────────────────────────
-async function getImages(article, count) {
+async function getImages(article) {
   const images = [];
 
-  // Try Pexels first
+  // Try Pexels
   const pexelsKey = process.env.PEXELS_API_KEY;
   if (pexelsKey) {
     try {
       const query = article.title.split(" ").slice(0, 3).join(" ");
       const res   = await axios.get("https://api.pexels.com/v1/search", {
-        params: { query: query, per_page: count + 2, orientation: "landscape" },
+        params: { query: query, per_page: IMG_COUNT + 2, orientation: "landscape" },
         headers: { Authorization: pexelsKey },
         timeout: 15000,
       });
       const photos = (res.data && res.data.photos) ? res.data.photos : [];
-      for (let i = 0; i < photos.length && images.length < count; i++) {
+      for (let i = 0; i < photos.length && images.length < IMG_COUNT; i++) {
         try {
-          const rawPath = path.join(TMP_DIR, "raw" + i + ".jpg");
-          const jpgPath = path.join(TMP_DIR, "img" + images.length + ".jpg");
-          await downloadFile(photos[i].src.large, rawPath);
-          await toJpg(rawPath, jpgPath);
-          images.push(jpgPath);
-        } catch(e) { console.log("[AutoVideo] Pexels img " + i + " failed:", e.message); }
+          const raw  = path.join(TMP_DIR, "raw" + i + ".jpg");
+          const jpg  = path.join(TMP_DIR, "img" + images.length + ".jpg");
+          await downloadFile(photos[i].src.medium, raw); // medium size = faster download
+          await toJpg(raw, jpg);
+          images.push(jpg);
+        } catch(e) {}
       }
-    } catch(e) { console.log("[AutoVideo] Pexels search failed:", e.message); }
+    } catch(e) { console.log("[AutoVideo] Pexels:", e.message); }
   }
 
   // Try article image
-  if (images.length < count && (article.image || article.urlToImage)) {
+  if (images.length < IMG_COUNT && (article.image || article.urlToImage)) {
     try {
-      const rawPath = path.join(TMP_DIR, "article_raw.jpg");
-      const jpgPath = path.join(TMP_DIR, "img" + images.length + ".jpg");
-      await downloadFile(article.image || article.urlToImage, rawPath);
-      await toJpg(rawPath, jpgPath);
-      images.push(jpgPath);
-    } catch(e) { console.log("[AutoVideo] Article image failed:", e.message); }
+      const raw = path.join(TMP_DIR, "article_raw.jpg");
+      const jpg = path.join(TMP_DIR, "img" + images.length + ".jpg");
+      await downloadFile(article.image || article.urlToImage, raw);
+      await toJpg(raw, jpg);
+      images.push(jpg);
+    } catch(e) {}
   }
 
-  // Fill remaining with solid color frames
-  const colors = ["1a1a2e", "16213e", "0f3460", "1b1b2f", "0d0d0d", "1a0a0a", "0a1a0a"];
-  while (images.length < count) {
-    const color   = colors[images.length % colors.length];
-    const jpgPath = path.join(TMP_DIR, "img" + images.length + ".jpg");
+  // Fill with colored frames
+  const colors = ["1a1a2e","16213e","0f3460","1b1b2f","0d0d0d","1a0a0a"];
+  while (images.length < IMG_COUNT) {
+    const jpg = path.join(TMP_DIR, "img" + images.length + ".jpg");
     await execAsync(
-      'ffmpeg -y -f lavfi -i "color=c=0x' + color + ':size=1280x720:rate=25" ' +
-      '-frames:v 1 "' + jpgPath + '"',
+      'ffmpeg -y -f lavfi -i "color=c=0x' + colors[images.length % colors.length] +
+      ':size=' + WIDTH + 'x' + HEIGHT + ':rate=1" -frames:v 1 "' + jpg + '"',
       { timeout: 15000 }
     );
-    images.push(jpgPath);
+    images.push(jpg);
   }
 
   return images;
@@ -123,142 +122,119 @@ async function getImages(article, count) {
 
 // ── Get logo ──────────────────────────────────────────────────────────────────
 async function getLogo() {
-  const rawPath  = path.join(TMP_DIR, "logo_raw.png");
   const logoPath = path.join(TMP_DIR, "logo.png");
   if (fs.existsSync(logoPath)) return logoPath;
   try {
-    await downloadFile(LOGO_URL, rawPath);
-    // Resize logo to 120x120 max
+    const raw = path.join(TMP_DIR, "logo_raw.png");
+    await downloadFile(LOGO_URL, raw);
     await execAsync(
-      'ffmpeg -y -i "' + rawPath + '" -vf "scale=120:120:force_original_aspect_ratio=decrease" "' + logoPath + '"',
+      'ffmpeg -y -i "' + raw + '" -vf "scale=80:80:force_original_aspect_ratio=decrease" "' + logoPath + '"',
       { timeout: 15000 }
     );
     return logoPath;
-  } catch(e) {
-    console.log("[AutoVideo] Logo failed:", e.message);
-    return null;
-  }
+  } catch(e) { return null; }
 }
 
 // ── Get music ─────────────────────────────────────────────────────────────────
 async function getMusic() {
   const musicPath = path.join(TMP_DIR, "music.mp3");
-  const tracks    = [
-    "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
-    "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
-    "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
-  ];
   try {
+    const tracks = [
+      "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+      "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+    ];
     await downloadFile(tracks[state.totalPosted % tracks.length], musicPath);
     return musicPath;
-  } catch(e) {
-    console.log("[AutoVideo] Music failed:", e.message);
-    return null;
-  }
+  } catch(e) { return null; }
 }
 
 // ── Generate video ────────────────────────────────────────────────────────────
 async function generateVideo(article, images, musicPath, logoPath) {
-  const outPath  = path.join(TMP_DIR, "output.mp4");
+  const outPath = path.join(TMP_DIR, "output.mp4");
   if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
 
   const headline = safeText(article.title);
   const source   = safeText((article.source && article.source.name) ? article.source.name : "NEWS").toUpperCase();
-  const dateStr  = safeText(new Date().toLocaleDateString("en-PH", { month: "long", day: "numeric", year: "numeric" }));
+  const dateStr  = safeText(new Date().toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" }));
 
-  // Step 1: Create slideshow from images (no filters, just concat)
-  const listFile = path.join(TMP_DIR, "imglist.txt");
-  let listContent = "";
+  // Build image list file for concat
+  const listFile = path.join(TMP_DIR, "list.txt");
+  let listTxt    = "";
   for (let i = 0; i < images.length; i++) {
-    listContent += "file '" + images[i] + "'\n";
-    listContent += "duration " + SLIDE_DUR + "\n";
+    listTxt += "file '" + images[i] + "'\nduration " + SLIDE_DUR + "\n";
   }
-  // Add last image again (required by ffmpeg concat demuxer)
-  listContent += "file '" + images[images.length - 1] + "'\n";
-  fs.writeFileSync(listFile, listContent);
+  listTxt += "file '" + images[images.length-1] + "'\n";
+  fs.writeFileSync(listFile, listTxt);
 
-  const slideshowPath = path.join(TMP_DIR, "slideshow.mp4");
+  // Slideshow path
+  const slidePath = path.join(TMP_DIR, "slide.mp4");
 
-  // Generate clean slideshow
+  // Step 1: Fast slideshow
   await execAsync(
     'ffmpeg -y -f concat -safe 0 -i "' + listFile + '" ' +
-    '-vf "fps=25,format=yuv420p" ' +
-    '-c:v libx264 -preset fast -crf 23 ' +
+    '-vf "fps=' + FPS + ',format=yuv420p" ' +
+    '-c:v libx264 -preset ultrafast -crf 30 ' +
     '-t ' + VIDEO_DUR + ' ' +
-    '"' + slideshowPath + '"',
-    { timeout: 180000 }
+    '"' + slidePath + '"',
+    { timeout: 120000 }
   );
+  console.log("[AutoVideo] Slideshow done");
 
-  console.log("[AutoVideo] Slideshow created");
+  // Step 2: Add overlays
+  const barY   = HEIGHT - 95;
+  const lineY  = HEIGHT - 97;
+  const text1Y = HEIGHT - 85;
+  const text2Y = HEIGHT - 60;
 
-  // Step 2: Add overlays (logo + lower third + text) to slideshow
-  let filterParts = [];
-  let inputs      = '"' + slideshowPath + '"';
-  let inputIdx    = 1;
+  const drawFilters = [
+    "drawbox=x=0:y=" + barY  + ":w=" + WIDTH + ":h=95:color=black@0.85:t=fill",
+    "drawbox=x=0:y=" + lineY + ":w=" + WIDTH + ":h=3:color=red:t=fill",
+    "drawtext=text='" + PAGE_NAME + "':fontcolor=red:fontsize=15:x=12:y=" + text1Y,
+    "drawtext=text='" + dateStr   + "':fontcolor=white@0.6:fontsize=13:x=w-tw-12:y=" + text1Y,
+    "drawtext=text='" + headline  + "':fontcolor=white:fontsize=19:x=12:y=" + text2Y,
+    "drawtext=text='" + source    + "':fontcolor=yellow:fontsize=14:x=w-tw-12:y=" + text2Y,
+  ].join(",");
 
-  // Start with base video
-  let currentStream = "0:v";
+  // Build inputs
+  let inputs    = '"' + slidePath + '"';
+  let inputIdx  = 1;
+  let baseStream = "0:v";
+  let filters   = [];
 
-  // Add logo overlay if available
   if (logoPath && fs.existsSync(logoPath)) {
     inputs += ' -i "' + logoPath + '"';
-    filterParts.push(
-      "[" + currentStream + "][" + inputIdx + ":v]overlay=20:20:format=auto[afterlogo]"
-    );
-    currentStream = "afterlogo";
+    filters.push("[" + baseStream + "][" + inputIdx + ":v]overlay=15:15:format=auto[logoout]");
+    baseStream = "logoout";
     inputIdx++;
   }
 
-  // Add GMA-style lower third bar + text
-  const drawFilters = [
-    // Dark bar
-    "drawbox=x=0:y=625:w=1280:h=95:color=black@0.85:t=fill",
-    // Red accent line
-    "drawbox=x=0:y=623:w=1280:h=4:color=red:t=fill",
-    // Page name
-    "drawtext=text='" + PAGE_NAME + "':fontcolor=red:fontsize=20:x=20:y=635",
-    // Date
-    "drawtext=text='" + dateStr + "':fontcolor=white@0.7:fontsize=16:x=w-tw-20:y=635",
-    // Headline
-    "drawtext=text='" + headline + "':fontcolor=white:fontsize=24:x=20:y=660",
-    // Source
-    "drawtext=text='" + source + "':fontcolor=yellow:fontsize=18:x=w-tw-20:y=663",
-  ].join(",");
+  filters.push("[" + baseStream + "]" + drawFilters + "[final]");
 
-  filterParts.push("[" + currentStream + "]" + drawFilters + "[finalout]");
+  const fc = filters.join("; ");
 
-  const filterComplex = filterParts.join("; ");
-
-  // Step 3: Combine with music
-  let finalCmd = 'ffmpeg -y -i ' + inputs;
+  let cmd = 'ffmpeg -y -i ' + inputs;
 
   if (musicPath && fs.existsSync(musicPath)) {
-    finalCmd += ' -i "' + musicPath + '"';
-    const audioIdx = inputIdx;
-    finalCmd += ' -filter_complex "' + filterComplex + '"';
-    finalCmd += ' -map "[finalout]"';
-    finalCmd += ' -map ' + audioIdx + ':a';
-    finalCmd += ' -c:v libx264 -preset fast -crf 23';
-    finalCmd += ' -c:a aac -b:a 128k';
-    finalCmd += ' -filter:a "volume=0.25"';
-    finalCmd += ' -t ' + VIDEO_DUR;
-    finalCmd += ' -shortest';
+    cmd += ' -i "' + musicPath + '"';
+    cmd += ' -filter_complex "' + fc + '"';
+    cmd += ' -map "[final]" -map ' + inputIdx + ':a';
+    cmd += ' -c:v libx264 -preset ultrafast -crf 30';
+    cmd += ' -c:a aac -b:a 96k -filter:a "volume=0.25"';
+    cmd += ' -t ' + VIDEO_DUR + ' -shortest';
   } else {
-    finalCmd += ' -filter_complex "' + filterComplex + '"';
-    finalCmd += ' -map "[finalout]"';
-    finalCmd += ' -c:v libx264 -preset fast -crf 23';
-    finalCmd += ' -t ' + VIDEO_DUR;
-    finalCmd += ' -an';
+    cmd += ' -filter_complex "' + fc + '"';
+    cmd += ' -map "[final]"';
+    cmd += ' -c:v libx264 -preset ultrafast -crf 30';
+    cmd += ' -t ' + VIDEO_DUR + ' -an';
   }
 
-  finalCmd += ' "' + outPath + '"';
+  cmd += ' "' + outPath + '"';
 
-  console.log("[AutoVideo] Rendering final video...");
-  await execAsync(finalCmd, { timeout: 300000, maxBuffer: 50 * 1024 * 1024 });
+  console.log("[AutoVideo] Rendering final...");
+  await execAsync(cmd, { timeout: 180000, maxBuffer: 50 * 1024 * 1024 });
 
-  if (!fs.existsSync(outPath)) throw new Error("ffmpeg failed — output not created");
-  const size = (fs.statSync(outPath).size / 1024 / 1024).toFixed(1);
-  console.log("[AutoVideo] Final video: " + size + "MB");
+  if (!fs.existsSync(outPath)) throw new Error("Output file not created");
+  console.log("[AutoVideo] Done: " + (fs.statSync(outPath).size/1024/1024).toFixed(1) + "MB");
   return outPath;
 }
 
@@ -324,11 +300,11 @@ async function fetchNews() {
     );
     return ((res.data && res.data.items) ? res.data.items : []).map(function(item) {
       return {
-        title:       item.title,
+        title:  item.title,
         description: item.description ? item.description.replace(/<[^>]*>/g,"").substring(0,200) : "",
-        url:         item.link,
-        image:       (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail||null),
-        source:      { name: "BBC News" },
+        url:    item.link,
+        image:  (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail||null),
+        source: { name: "BBC News" },
       };
     });
   } catch(e) { return []; }
@@ -338,8 +314,8 @@ async function fetchNews() {
 async function generateCaption(article) {
   try {
     const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
-      params: { prompt: "Write a short engaging Facebook post caption for this news video (2-3 sentences, no hashtags, no asterisks, no markdown):\n\nHeadline: " + article.title },
-      timeout: 25000,
+      params: { prompt: "Write a short Facebook post caption for this news video (2-3 sentences, no hashtags, no asterisks):\n\nHeadline: " + article.title },
+      timeout: 20000,
     });
     const r = (res.data && res.data.data && res.data.data.text) ? res.data.data.text : null;
     if (r && r.length > 20) return r.replace(/\*\*/g,"").replace(/\*/g,"").trim();
@@ -358,7 +334,7 @@ function cleanTmp() {
   } catch(e) {}
 }
 
-// ── Main auto post ────────────────────────────────────────────────────────────
+// ── Main ──────────────────────────────────────────────────────────────────────
 async function autoPost(notifyFn) {
   if (state.isPosting) { notifyFn("⏳ Still generating, skipping..."); return; }
   state.isPosting = true;
@@ -374,19 +350,19 @@ async function autoPost(notifyFn) {
     if (!article) { state.postedUrls.clear(); article = articles[0]; }
 
     state.postedUrls.add(article.url);
-    notifyFn("📰 Generating: " + article.title + "\n⏳ Takes 3-5 minutes...");
+    notifyFn("📰 Generating: " + article.title + "\n⏳ Takes ~2 minutes...");
 
     const [images, musicPath, logoPath] = await Promise.all([
-      getImages(article, IMG_COUNT),
+      getImages(article),
       getMusic(),
       getLogo(),
     ]);
 
-    notifyFn("🎬 Rendering video...");
+    notifyFn("🎬 Rendering...");
     const videoPath = await generateVideo(article, images, musicPath, logoPath);
     const caption   = await generateCaption(article);
 
-    notifyFn("📤 Uploading to Facebook...");
+    notifyFn("📤 Uploading...");
     await uploadToFacebook(videoPath, article.title, caption);
 
     state.totalPosted++;
@@ -395,7 +371,7 @@ async function autoPost(notifyFn) {
 
   } catch (err) {
     notifyFn("❌ Failed: " + err.message);
-    console.error("[AutoVideo] Error:", err.message);
+    console.error("[AutoVideo]", err.message);
   } finally {
     cleanTmp();
     state.isPosting = false;
@@ -409,9 +385,9 @@ function startAutoVideo() {
     console.log("[AutoVideo] Not started: Missing env vars.");
     return;
   }
-  console.log("[AutoVideo] Starting GMA-style news video generator...");
-  setTimeout(function() { autoPost(function(msg) { console.log("[AutoVideo]", msg); }); }, 5 * 60 * 1000);
-  state.interval = setInterval(function() { autoPost(function(msg) { console.log("[AutoVideo]", msg); }); }, 60 * 60 * 1000);
+  console.log("[AutoVideo] Starting...");
+  setTimeout(function() { autoPost(function(m){ console.log("[AutoVideo]", m); }); }, 5 * 60 * 1000);
+  state.interval = setInterval(function() { autoPost(function(m){ console.log("[AutoVideo]", m); }); }, 60 * 60 * 1000);
 }
 
 startAutoVideo();
@@ -422,36 +398,36 @@ module.exports.run = async function ({ api, args, event }) {
   const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id){ return id.trim(); }).filter(Boolean);
   const isAdmin = ADMINS.length === 0 || ADMINS.includes(uid);
 
-  if (!isAdmin) return api.send("⛔ This command is for admins only!");
+  if (!isAdmin) return api.send("⛔ Admins only!");
 
   const action = (args[0] || "status").toLowerCase();
 
   if (action === "status") {
     return api.send(
-      "📺 AutoVideo (GMA Style)\n━━━━━━━━━━━━━━\n" +
+      "📺 AutoVideo Status\n━━━━━━━━━━━━━━\n" +
       "Status: "       + (state.interval ? "🟢 Running" : "🔴 Stopped") + "\n" +
+      "Resolution: 480p (fast mode)\n" +
+      "Duration: 30 seconds\n" +
       "Total posted: " + state.totalPosted + "\n" +
       "Last posted: "  + (state.lastPosted ? new Date(state.lastPosted).toLocaleString() : "Never") + "\n" +
-      "Interval: Every 1 hour\n" +
-      "Duration: 60 seconds\n" +
-      "Pexels: "       + (process.env.PEXELS_API_KEY ? "✅ Connected" : "⚠️ Not set")
+      "Pexels: "       + (process.env.PEXELS_API_KEY ? "✅" : "⚠️ Not set")
     );
   }
   if (action === "test") {
-    api.send("🎬 Generating GMA-style video...\n⏳ Takes 3-5 minutes...");
+    api.send("🎬 Generating video...\n⏳ ~2 minutes, please wait...");
     await autoPost(function(msg) { api.send(msg); });
     return;
   }
   if (action === "on") {
     if (state.interval) return api.send("Already running!");
     startAutoVideo();
-    return api.send("✅ AutoVideo started!");
+    return api.send("✅ AutoVideo started! Posts every 1 hour.");
   }
   if (action === "off") {
     if (!state.interval) return api.send("Already stopped!");
     clearInterval(state.interval);
     state.interval = null;
-    return api.send("🔴 AutoVideo stopped.");
+    return api.send("🔴 Stopped.");
   }
   if (action === "reset") {
     state.postedUrls.clear();
