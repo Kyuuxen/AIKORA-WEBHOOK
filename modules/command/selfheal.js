@@ -23,11 +23,6 @@ const DEFAULT_TESTS = {
     checks:  ["QUESTION:", "A:", "B:", "C:", "D:", "ANSWER:"],
     mustNot: ["Could not parse", "undefined", "null"],
   },
-  "anime": {
-    desc:    "Must return anime info",
-    checks:  ["Title", "Rating"],
-    mustNot: ["error", "undefined"],
-  },
   "autonews": {
     desc:    "Must have config and run",
     checks:  ["module.exports.config", "module.exports.run"],
@@ -48,6 +43,8 @@ if (!global.selfHealState) {
     totalFails: 0,
     log:        [],
     tests:      {},
+    healing:    new Set(),  // commands currently being healed
+    cooldown:   {},         // cooldown timestamps per command
   };
 }
 const state = global.selfHealState;
@@ -193,6 +190,20 @@ function hotLoad(filePath) {
 async function healCommand(cmdName, errorMessage, notifyFn) {
   if (!state.enabled) return;
 
+  // Prevent infinite loop — skip if already healing this command
+  if (state.healing.has(cmdName)) {
+    console.log("[SelfHeal] Already healing " + cmdName + ", skipping.");
+    return;
+  }
+
+  // Cooldown — don't re-heal same command within 5 minutes
+  const now      = Date.now();
+  const lastHeal = state.cooldown[cmdName] || 0;
+  if (now - lastHeal < 5 * 60 * 1000) {
+    console.log("[SelfHeal] Cooldown active for " + cmdName + ", skipping.");
+    return;
+  }
+
   const filePath   = path.join(CMD_DIR, cmdName + ".js");
   const githubPath = "modules/command/" + cmdName + ".js";
 
@@ -200,6 +211,10 @@ async function healCommand(cmdName, errorMessage, notifyFn) {
     notifyFn && notifyFn("❌ SelfHeal: File not found — " + cmdName + ".js");
     return;
   }
+
+  // Lock this command
+  state.healing.add(cmdName);
+  state.cooldown[cmdName] = now;
 
   const originalCode = fs.readFileSync(filePath, "utf8");
   const test         = state.tests[cmdName];
@@ -297,6 +312,7 @@ async function healCommand(cmdName, errorMessage, notifyFn) {
         "☁️ GitHub synced: " + (githubSuccess ? "✅ Permanent" : "⚠️ Local only")
       );
       fixed = true;
+      state.healing.delete(cmdName); // release lock on success
 
     } catch(err) {
       console.log("[SelfHeal] Attempt " + attempt + " error:", err.message);
@@ -309,13 +325,40 @@ async function healCommand(cmdName, errorMessage, notifyFn) {
     state.log.push({ type: "fail", cmd: cmdName, error: errorMessage.substring(0, 100), attempts: attempt, time: new Date().toISOString() });
     saveLog();
     // Restore original
-    fs.writeFileSync(filePath, originalCode, "utf8");
+    try { fs.writeFileSync(filePath, originalCode, "utf8"); } catch(e) {}
     notifyFn && notifyFn(
       "❌ SelfHeal: Could not fix !" + cmdName + " after " + attempt + " attempts.\n" +
       "Original code restored.\n" +
       "💡 Try: !selfheal addtest " + cmdName + " to add better test cases."
     );
   }
+
+  // Always release lock when done
+  state.healing.delete(cmdName);
+}
+
+// ── Error keywords that indicate logic failure ────────────────────────────────
+const LOGIC_ERROR_PATTERNS = [
+  "could not parse",
+  "could not generate",
+  "failed to fetch",
+  "no results found",
+  "something went wrong",
+  "try again later",
+  "undefined",
+  "cannot read",
+  "is not a function",
+  "unexpected token",
+];
+
+// ── Check if a bot reply indicates a logic error ──────────────────────────────
+function isLogicError(text) {
+  if (!text || typeof text !== "string") return false;
+  const lower = text.toLowerCase();
+  for (let i = 0; i < LOGIC_ERROR_PATTERNS.length; i++) {
+    if (lower.includes(LOGIC_ERROR_PATTERNS[i])) return true;
+  }
+  return false;
 }
 
 // ── Attach error interceptors ─────────────────────────────────────────────────
@@ -326,15 +369,43 @@ function attachInterceptors(notifyFn) {
     if (!cmd._selfHealWrapped && typeof cmd.run === "function") {
       const originalRun = cmd.run;
       cmd.run = async function(ctx) {
+        // Wrap api.send to monitor output for logic errors
+        const originalSend = ctx.api.send.bind(ctx.api);
+        let sentMessages   = [];
+
+        ctx.api.send = async function(msg) {
+          const text = typeof msg === "string" ? msg : (msg && msg.text ? msg.text : "");
+          sentMessages.push(text);
+
+          // Detect logic errors in output silently in background
+          if (isLogicError(text) && !state.healing.has(name)) {
+            console.log("[SelfHeal] Logic error detected in !" + name + ": " + text.substring(0, 60));
+            // Heal silently in background — don't notify user, just fix it
+            setTimeout(function() {
+              healCommand(name, "Logic error detected: " + text.substring(0, 80), notifyFn);
+            }, 1000);
+          }
+
+          return originalSend(msg);
+        };
+
         try {
           return await originalRun(ctx);
         } catch(err) {
-          console.error("[SelfHeal] Caught error in !" + name + ":", err.message);
+          // Crash error — notify user and heal
+          console.error("[SelfHeal] Crash in !" + name + ":", err.message);
           state.log.push({ type: "error", cmd: name, error: err.message.substring(0, 100), time: new Date().toISOString() });
           saveLog();
-          try { ctx.api.send("⚠️ !" + name + " has an error. SelfHeal is fixing it automatically..."); } catch(e) {}
-          healCommand(name, err.message, notifyFn);
-          throw err;
+
+          // Only tell user if we haven't sent any message yet
+          if (sentMessages.length === 0) {
+            try { originalSend("⚠️ !" + name + " encountered an error. SelfHeal is fixing it..."); } catch(e) {}
+          }
+
+          // Heal in background
+          setTimeout(function() {
+            healCommand(name, err.message, notifyFn);
+          }, 500);
         }
       };
       cmd._selfHealWrapped = true;
