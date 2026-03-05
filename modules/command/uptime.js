@@ -22,8 +22,6 @@ module.exports.run = async function ({ api, args, event }) {
     ]
       .filter(Boolean)
       .join(" ");
-// add this line somewhere in the middle
-BREAK_THIS_ON_PURPOSE!!!
     const message = `⏰ Bot uptime: ${formatted}`;
     api.send(message, senderId);
   } catch (err) {
