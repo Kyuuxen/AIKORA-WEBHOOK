@@ -1,6 +1,15 @@
 const axios = require("axios");
 if (!global.quizState) global.quizState = new Map();
 
+/*
+QUESTION:
+A:
+B:
+C:
+D:
+ANSWER:
+*/
+
 module.exports.config = {
   name: "quiz",
   description: "Answer questions about any topic",
@@ -14,10 +23,7 @@ module.exports.run = async function ({ api, args, event }) {
 
   if (["a", "b", "c", "d"].includes(first)) {
     const state = global.quizState.get(uid);
-    if (!state)
-      return api.sendMessage(
-        "❌ No active quiz. Start one with: !quiz [topic]"
-      );
+    if (!state) return api.sendMessage("❌ No active quiz. Start one with: !quiz [topic]");
     global.quizState.delete(uid);
     if (first.toUpperCase() === state.correct) {
       return api.sendMessage(`✅ CORRECT!\n\n📖 ${state.explanation}`);
@@ -30,32 +36,25 @@ module.exports.run = async function ({ api, args, event }) {
 
   const topic = args.join(" ");
   if (!topic) {
-    return api.sendMessage(
-      "❌ Provide a topic: !quiz [topic]\nThen answer with !quiz a/b/c/d"
-    );
+    return api.sendMessage("❌ Provide a topic: !quiz [topic]\nThen answer with !quiz a/b/c/d");
   }
 
   api.sendMessage(`🧠 Generating quiz on: ${topic}...`);
   try {
-    const res = await axios.get(
-      "https://api-library-kohi.onrender.com/api/copilot",
-      {
-        params: {
-          prompt: `Generate a multiple choice question about "${topic}". Format:\nQUESTION: [question]\nA) [option]\nB) [option]\nC) [option]\nD) [option]\nANSWER: [letter]\nEXPLANATION: [why]`,
-          model: "default",
-          user: "quiz_" + uid,
-        },
-        timeout: 30000,
-      }
-    );
+    const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
+      params: {
+        prompt: `Generate a multiple choice question about "${topic}". Format:\nQUESTION: [question]\nA) [option]\nB) [option]\nC) [option]\nD) [option]\nANSWER: [letter]\nEXPLANATION: [why]`,
+        model: "default",
+        user: "quiz_" + uid,
+      },
+      timeout: 30000,
+    });
     const text = res.data?.data?.text ?? "";
     const aMatch = text.match(/ANSWER:\s*([ABCD])/i);
     const eMatch = text.match(/EXPLANATION:\s*([\s\S]+?)(?:\n\n|$)/i);
 
     if (!aMatch) {
-      return api.sendMessage(
-        "❌ Could not parse the answer. Try again!"
-      );
+      return api.sendMessage("❌ Error in quiz generation. Try again!");
     }
 
     global.quizState.set(uid, {
@@ -64,9 +63,7 @@ module.exports.run = async function ({ api, args, event }) {
     });
 
     const cleanText = text.replace(/ANSWER:[\s\S]*/i, "").trim();
-    api.sendMessage(
-      `🧠 QUIZ: ${topic}\n━━━━━━━━━━━━━━\n${cleanText}\n\nReply: !quiz a / b / c / d`
-    );
+    api.sendMessage(`🧠 QUIZ: ${topic}\n━━━━━━━━━━━━━━\n${cleanText}\n\nReply: !quiz a / b / c / d`);
   } catch (err) {
     api.sendMessage("❌ Failed to fetch quiz. Try again!");
   }
