@@ -11,52 +11,65 @@ module.exports.config = {
 const NEWS_MODES = {
   "philippines": {
     label:   "🇵🇭 Philippines Only",
-    country: "ph",
-    lang:    "en",
-    topics:  ["general", "nation", "business", "technology", "sports", "health"],
-    rss:     "https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/feed",
+    // Rotates through multiple PH news RSS feeds
+    rssFeeds: [
+      "https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/feed",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://newsinfo.inquirer.net/feed",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://www.philstar.com/rss/headlines",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://mb.com.ph/feed",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://www.gmanetwork.com/news/rss/news",
+    ],
+    gnews: null, // skip gnews for PH mode, RSS is more accurate
   },
   "world": {
     label:   "🌍 World News",
-    country: "us",
-    lang:    "en",
-    topics:  ["world", "general", "business", "technology", "science", "health"],
-    rss:     "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/world/rss.xml",
+    rssFeeds: [
+      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/world/rss.xml",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://rss.cnn.com/rss/edition_world.rss",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.reuters.com/reuters/topNews",
+    ],
+    gnews: { country: "us", lang: "en", topics: ["world", "general"] },
   },
   "technology": {
     label:   "💻 Technology",
-    country: "us",
-    lang:    "en",
-    topics:  ["technology"],
-    rss:     "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.feedburner.com/TechCrunch",
+    rssFeeds: [
+      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.feedburner.com/TechCrunch",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://www.theverge.com/rss/index.xml",
+    ],
+    gnews: { country: "us", lang: "en", topics: ["technology"] },
   },
   "sports": {
     label:   "⚽ Sports",
-    country: "ph",
-    lang:    "en",
-    topics:  ["sports"],
-    rss:     "https://api.rss2json.com/v1/api.json?rss_url=https://www.espn.com/espn/rss/news",
+    rssFeeds: [
+      "https://api.rss2json.com/v1/api.json?rss_url=https://www.espn.com/espn/rss/news",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/sports/feed",
+    ],
+    gnews: { country: "ph", lang: "en", topics: ["sports"] },
   },
   "entertainment": {
     label:   "🎬 Entertainment",
-    country: "ph",
-    lang:    "en",
-    topics:  ["entertainment"],
-    rss:     "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml",
+    rssFeeds: [
+      "https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/entertainment/feed",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml",
+    ],
+    gnews: { country: "ph", lang: "en", topics: ["entertainment"] },
   },
   "business": {
     label:   "💼 Business",
-    country: "ph",
-    lang:    "en",
-    topics:  ["business"],
-    rss:     "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/business/rss.xml",
+    rssFeeds: [
+      "https://api.rss2json.com/v1/api.json?rss_url=https://business.inquirer.net/feed",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/business/rss.xml",
+    ],
+    gnews: { country: "ph", lang: "en", topics: ["business"] },
   },
   "mixed": {
     label:   "🔀 Mixed (All Topics)",
-    country: "ph",
-    lang:    "en",
-    topics:  ["general", "world", "nation", "business", "technology", "entertainment", "sports", "science", "health"],
-    rss:     "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml",
+    rssFeeds: [
+      "https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/feed",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml",
+      "https://api.rss2json.com/v1/api.json?rss_url=https://newsinfo.inquirer.net/feed",
+    ],
+    gnews: { country: "ph", lang: "en", topics: ["general", "world", "nation", "business", "technology", "entertainment", "sports"] },
   },
 };
 
@@ -122,22 +135,54 @@ async function initDB() {
   console.log("[AutoNews] DB ready. Mode: " + state.mode + " | " + state.posted.size + " titles loaded.");
 }
 
+// ── Fetch from RSS ────────────────────────────────────────────────────────────
+async function fetchRSS(rssUrl) {
+  const res   = await axios.get(rssUrl, { timeout: 15000 });
+  const items = (res.data && res.data.items) ? res.data.items : [];
+  return items.map(function(item) {
+    return {
+      title:       item.title,
+      description: item.description ? item.description.replace(/<[^>]*>/g, "").substring(0, 200) : "",
+      url:         item.link,
+      image:       (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail || null),
+      source:      { name: res.data.feed ? res.data.feed.title : "News" },
+    };
+  });
+}
+
 // ── Fetch news based on current mode ─────────────────────────────────────────
 async function fetchNews() {
   const modeConfig = NEWS_MODES[state.mode] || NEWS_MODES["philippines"];
-  const topic      = modeConfig.topics[state.categoryIndex % modeConfig.topics.length];
+
+  // For Philippines mode — ONLY use PH RSS feeds, skip GNews
+  if (!modeConfig.gnews) {
+    const feedIndex = state.categoryIndex % modeConfig.rssFeeds.length;
+    state.categoryIndex++;
+    const feedUrl = modeConfig.rssFeeds[feedIndex];
+    try {
+      const articles = await fetchRSS(feedUrl);
+      console.log("[AutoNews] PH RSS [" + feedIndex + "]: " + articles.length + " articles");
+      if (articles.length > 0) return articles;
+    } catch(e) { console.log("[AutoNews] PH RSS failed:", e.message); }
+
+    // Try next PH feed if first fails
+    for (let i = 0; i < modeConfig.rssFeeds.length; i++) {
+      try {
+        const articles = await fetchRSS(modeConfig.rssFeeds[i]);
+        if (articles.length > 0) return articles;
+      } catch(e) {}
+    }
+    return [];
+  }
+
+  // For other modes — try GNews first, fallback to RSS
+  const gnews  = modeConfig.gnews;
+  const topic  = gnews.topics[state.categoryIndex % gnews.topics.length];
   state.categoryIndex++;
 
-  // Try GNews API
   try {
     const res = await axios.get("https://gnews.io/api/v4/top-headlines", {
-      params: {
-        lang:    modeConfig.lang,
-        country: modeConfig.country,
-        topic:   topic,
-        max:     20,
-        apikey:  process.env.GNEWS_API_KEY || "demo",
-      },
+      params: { lang: gnews.lang, country: gnews.country, topic: topic, max: 20, apikey: process.env.GNEWS_API_KEY || "demo" },
       timeout: 15000,
     });
     const articles = (res.data && res.data.articles) ? res.data.articles : [];
@@ -147,34 +192,17 @@ async function fetchNews() {
     }
   } catch(e) { console.log("[AutoNews] GNews failed:", e.message); }
 
-  // Fallback RSS
+  // RSS fallback
+  const feedIdx = state.categoryIndex % modeConfig.rssFeeds.length;
   try {
-    const rss  = await axios.get(modeConfig.rss, { timeout: 15000 });
-    const items = (rss.data && rss.data.items) ? rss.data.items : [];
-    console.log("[AutoNews] RSS fallback: " + items.length + " articles");
-    return items.map(function(item) {
-      return {
-        title:       item.title,
-        description: item.description ? item.description.replace(/<[^>]*>/g, "").substring(0, 200) : "",
-        url:         item.link,
-        image:       (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail || null),
-        source:      { name: rss.data.feed ? rss.data.feed.title : "News" },
-      };
-    });
+    const articles = await fetchRSS(modeConfig.rssFeeds[feedIdx]);
+    console.log("[AutoNews] RSS fallback: " + articles.length + " articles");
+    if (articles.length > 0) return articles;
   } catch(e) { console.log("[AutoNews] RSS failed:", e.message); }
 
-  // Last resort BBC
+  // Last resort — Rappler
   try {
-    const rss  = await axios.get("https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml", { timeout: 15000 });
-    const items = (rss.data && rss.data.items) ? rss.data.items : [];
-    return items.map(function(item) {
-      return {
-        title:  item.title,
-        url:    item.link,
-        image:  (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail || null),
-        source: { name: "BBC News" },
-      };
-    });
+    return await fetchRSS("https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/feed");
   } catch(e) { return []; }
 }
 
