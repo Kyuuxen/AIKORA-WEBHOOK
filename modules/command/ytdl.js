@@ -1,9 +1,6 @@
 const axios   = require("axios");
 const fs      = require("fs");
 const path    = require("path");
-const { promisify } = require("util");
-const { exec }      = require("child_process");
-const execAsync     = promisify(exec);
 
 module.exports.config = {
   name:        "ytdl",
@@ -42,12 +39,9 @@ async function getVideoInfo(videoId) {
     return {
       title:    item.snippet.title,
       channel:  item.snippet.channelTitle,
-      duration: item.contentDetails.duration, // ISO 8601 e.g. PT4M13S
+      duration: item.contentDetails.duration,
     };
-  } catch(e) {
-    console.log("[YTDL] YouTube API failed:", e.message);
-    return null;
-  }
+  } catch(e) { return null; }
 }
 
 // ── Parse ISO 8601 duration ───────────────────────────────────────────────────
@@ -55,104 +49,123 @@ function parseDuration(iso) {
   if (!iso) return 0;
   const match = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
   if (!match) return 0;
-  return ((parseInt(match[1]) || 0) * 3600) +
-         ((parseInt(match[2]) || 0) * 60)  +
-          (parseInt(match[3]) || 0);
+  return ((parseInt(match[1])||0)*3600) + ((parseInt(match[2])||0)*60) + (parseInt(match[3])||0);
 }
 
-// ── Ensure yt-dlp is available ────────────────────────────────────────────────
-async function ensureYtDlp() {
-  // Try youtube-dl-exec npm package first
-  try {
-    require("youtube-dl-exec");
-    return "ytdlexec";
-  } catch(e) {}
+// ── Get download URL via y2mate ───────────────────────────────────────────────
+async function getDownloadUrl(videoId) {
+  const videoUrl = "https://www.youtube.com/watch?v=" + videoId;
 
-  // Try yt-dlp binary
-  try { await execAsync("yt-dlp --version"); return "binary"; } catch(e) {}
-  try { await execAsync("/tmp/yt-dlp --version"); return "binary_tmp"; } catch(e) {}
+  // Step 1: Analyze video
+  const analyzeRes = await axios.post(
+    "https://www.y2mate.com/mates/analyzeV2/ajax",
+    "k_query=" + encodeURIComponent(videoUrl) + "&k_page=home&hl=en&q_auto=0",
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer":      "https://www.y2mate.com/",
+      },
+      timeout: 20000,
+    }
+  );
 
-  // Download binary
-  try {
-    await execAsync(
-      "curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /tmp/yt-dlp && chmod +x /tmp/yt-dlp",
-      { timeout: 60000 }
-    );
-    await execAsync("/tmp/yt-dlp --version");
-    return "binary_tmp";
-  } catch(e) {}
+  const data = analyzeRes.data;
+  if (!data || data.status !== "ok") throw new Error("y2mate analyze failed");
 
-  return null;
+  // Get best video quality key (prefer 360p or 480p for speed)
+  const links = data.links && data.links.mp4 ? data.links.mp4 : {};
+  let bestKey  = null;
+  let bestSize = 0;
+
+  const preferred = ["360p", "480p", "720p", "240p", "144p"];
+  for (let i = 0; i < preferred.length; i++) {
+    const quality = preferred[i];
+    if (links[quality] && links[quality].k) {
+      bestKey = links[quality].k;
+      break;
+    }
+  }
+
+  // Fallback: pick any available quality
+  if (!bestKey) {
+    const keys = Object.keys(links);
+    if (keys.length > 0 && links[keys[0]].k) bestKey = links[keys[0]].k;
+  }
+
+  if (!bestKey) throw new Error("No downloadable format found");
+
+  // Step 2: Convert to get download link
+  const convertRes = await axios.post(
+    "https://www.y2mate.com/mates/convertV2/index",
+    "vid=" + videoId + "&k=" + encodeURIComponent(bestKey),
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer":      "https://www.y2mate.com/",
+      },
+      timeout: 30000,
+    }
+  );
+
+  const convertData = convertRes.data;
+  if (!convertData || convertData.status !== "ok") throw new Error("y2mate convert failed");
+
+  // Extract download URL from response
+  const dlUrl = convertData.dlink;
+  if (!dlUrl) throw new Error("No download link in response");
+
+  console.log("[YTDL] Got download URL from y2mate");
+  return dlUrl;
 }
 
-// ── Download video ────────────────────────────────────────────────────────────
-async function downloadVideo(videoUrl, videoId, method) {
+// ── Download video file ───────────────────────────────────────────────────────
+async function downloadFile(url, videoId) {
   const outPath = path.join(TMP_DIR, videoId + ".mp4");
   if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
 
-  if (method === "ytdlexec") {
-    const ytdl = require("youtube-dl-exec");
-    await ytdl(videoUrl, {
-      noPlaylist:        true,
-      format:            "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]/best",
-      mergeOutputFormat: "mp4",
-      output:            outPath,
-      noWarnings:        true,
-    });
-  } else {
-    const bin = method === "binary_tmp" ? "/tmp/yt-dlp" : "yt-dlp";
-    await execAsync(
-      bin + ' --no-playlist --max-filesize 25M' +
-      ' -f "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]/best"' +
-      ' --merge-output-format mp4' +
-      ' -o "' + outPath + '" ' + videoUrl,
-      { timeout: 120000 }
-    );
-  }
+  const res = await axios.get(url, {
+    responseType: "arraybuffer",
+    timeout:      120000,
+    maxContentLength: 50 * 1024 * 1024, // 50MB max
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      "Referer":    "https://www.y2mate.com/",
+    },
+  });
 
-  if (!fs.existsSync(outPath)) throw new Error("Download failed");
+  fs.writeFileSync(outPath, Buffer.from(res.data));
   const mb = (fs.statSync(outPath).size / 1024 / 1024).toFixed(1);
-  if (fs.statSync(outPath).size < 10000) throw new Error("File too small");
   console.log("[YTDL] Downloaded: " + mb + "MB");
+  if (fs.statSync(outPath).size < 10000) throw new Error("File too small - download failed");
   return outPath;
 }
 
 // ── Send video to Messenger ───────────────────────────────────────────────────
 async function sendVideo(api, recipientId, filePath, caption) {
-  // First send caption
   if (caption) await api.send(caption);
 
-  // Send video file via Messenger Send API
   const pageToken = process.env.PAGE_ACCESS_TOKEN;
   if (!pageToken) throw new Error("PAGE_ACCESS_TOKEN not set");
 
   const FormData = require("form-data");
   const form     = new FormData();
-
-  form.append("recipient",  JSON.stringify({ id: recipientId }));
-  form.append("message",    JSON.stringify({
-    attachment: {
-      type:    "video",
-      payload: {},
-    },
-  }));
-  form.append("filedata", fs.createReadStream(filePath), {
-    filename:    "video.mp4",
-    contentType: "video/mp4",
-  });
+  form.append("recipient",    JSON.stringify({ id: recipientId }));
+  form.append("message",      JSON.stringify({ attachment: { type: "video", payload: {} } }));
+  form.append("filedata",     fs.createReadStream(filePath), { filename: "video.mp4", contentType: "video/mp4" });
   form.append("access_token", pageToken);
 
-  const res = await axios.post(
+  await axios.post(
     "https://graph.facebook.com/v19.0/me/messages",
     form,
     {
       headers: form.getHeaders(),
       timeout: 120000,
-      maxBodyLength: Infinity,
+      maxBodyLength:    Infinity,
       maxContentLength: Infinity,
     }
   );
-  return res.data;
 }
 
 // ── Cleanup ───────────────────────────────────────────────────────────────────
@@ -160,112 +173,89 @@ function cleanup(filePath) {
   try { if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch(e) {}
 }
 
-// ── Command ───────────────────────────────────────────────────────────────────
-module.exports.run = async function ({ api, args, event }) {
-  const input   = args.join(" ").trim();
+// ── Main handler ──────────────────────────────────────────────────────────────
+async function handleDownload(api, event, input) {
   const videoId = extractVideoId(input);
-
-  if (!videoId) {
-    return api.send(
-      "📹 YouTube Downloader\n━━━━━━━━━━━━━━\n" +
-      "Usage: !ytdl [YouTube URL]\n\n" +
-      "Example:\n!ytdl https://youtube.com/watch?v=xxxxx\n!ytdl https://youtu.be/xxxxx\n\n" +
-      "⚠️ Max video length: 10 minutes\n" +
-      "📦 Max file size: 25MB"
-    );
-  }
+  if (!videoId) return false;
 
   let filePath = null;
   try {
-    // Get video info
     const info = await getVideoInfo(videoId);
-    const url  = "https://www.youtube.com/watch?v=" + videoId;
 
     if (info) {
       const secs = parseDuration(info.duration);
-      if (secs > 600) { // 10 minutes max
-        return api.send(
+      if (secs > 600) {
+        await api.send(
           "⚠️ Video too long!\n\n" +
           "📹 " + info.title + "\n" +
-          "⏱️ Duration: " + Math.floor(secs/60) + " mins " + (secs%60) + " secs\n\n" +
-          "Maximum allowed: 10 minutes"
+          "⏱️ " + Math.floor(secs/60) + " mins " + (secs%60) + " secs\n\n" +
+          "Maximum: 10 minutes"
         );
+        return true;
       }
       await api.send(
         "📥 Downloading...\n\n" +
         "📹 " + info.title + "\n" +
         "📺 " + info.channel + "\n" +
         "⏱️ " + Math.floor(secs/60) + ":" + String(secs%60).padStart(2,"0") + "\n\n" +
-        "⏳ Please wait..."
+        "⏳ Please wait ~30 seconds..."
       );
     } else {
       await api.send("📥 Downloading video...\n⏳ Please wait...");
     }
 
-    // Check downloader
-    const method = await ensureYtDlp();
-    if (!method) {
-      return api.send("❌ Downloader not available. Please add youtube-dl-exec to package.json!");
-    }
+    // Get download URL from y2mate
+    const dlUrl  = await getDownloadUrl(videoId);
+    filePath      = await downloadFile(dlUrl, videoId);
 
-    // Download
-    filePath = await downloadVideo(url, videoId, method);
+    const caption = info
+      ? "📹 " + info.title + "\n📺 " + info.channel
+      : "📹 Here's your video!";
 
-    // Send to Messenger
-    const caption = info ? "📹 " + info.title + "\n📺 " + info.channel : "📹 Here's your video!";
     await sendVideo(api, event.senderId, filePath, caption);
+    console.log("[YTDL] Successfully sent video:", videoId);
 
   } catch(err) {
     console.error("[YTDL] Error:", err.message);
-
-    if (err.message.includes("Sign in") || err.message.includes("bot")) {
-      return api.send("❌ YouTube is blocking the download.\n\nTry a different video or try again later.");
-    }
-    if (err.message.includes("too large") || err.message.includes("25M")) {
-      return api.send("❌ Video file too large!\n\nTry a shorter video (under 5 minutes).");
-    }
-    api.send("❌ Failed: " + err.message);
+    await api.send(
+      "❌ Download failed!\n\n" +
+      "Reason: " + err.message + "\n\n" +
+      "💡 Tips:\n" +
+      "• Try a shorter video (under 5 mins)\n" +
+      "• Some videos are restricted\n" +
+      "• Try again in a few minutes"
+    );
   } finally {
     cleanup(filePath);
   }
+  return true;
+}
+
+// ── Command ───────────────────────────────────────────────────────────────────
+module.exports.run = async function ({ api, args, event }) {
+  const input = args.join(" ").trim();
+
+  if (!input) {
+    return api.send(
+      "📹 YouTube Downloader\n━━━━━━━━━━━━━━\n" +
+      "Usage: !ytdl [YouTube URL]\n\n" +
+      "Examples:\n" +
+      "!ytdl https://youtu.be/xxxxx\n" +
+      "!ytdl https://youtube.com/watch?v=xxxxx\n" +
+      "!ytdl https://youtube.com/shorts/xxxxx\n\n" +
+      "⏱️ Max: 10 minutes\n" +
+      "📦 Quality: 360p-480p"
+    );
+  }
+
+  await handleDownload(api, event, input);
 };
 
-// ── Auto-detect YouTube links in chat (no command needed) ─────────────────────
+// ── Auto-detect YouTube links ─────────────────────────────────────────────────
 module.exports.handleMessage = async function ({ api, event }) {
   if (!event.body) return;
-  const videoId = extractVideoId(event.body);
-  if (!videoId) return;
-
-  // Only auto-download if message is JUST a YouTube link
   const isJustLink = event.body.trim().match(/^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\S+$/);
   if (!isJustLink) return;
-
-  console.log("[YTDL] Auto-detected YouTube link:", videoId);
-
-  let filePath = null;
-  try {
-    const info   = await getVideoInfo(videoId);
-    const url    = "https://www.youtube.com/watch?v=" + videoId;
-    const secs   = info ? parseDuration(info.duration) : 0;
-
-    if (secs > 600) {
-      await api.send("⚠️ Video too long to download (max 10 mins).\n📹 " + (info ? info.title : videoId));
-      return;
-    }
-
-    await api.send("📥 YouTube link detected! Downloading...\n⏳ Please wait...");
-
-    const method = await ensureYtDlp();
-    if (!method) return;
-
-    filePath = await downloadVideo(url, videoId, method);
-    const caption = info ? "📹 " + info.title + "\n📺 " + info.channel : "📹 Here's your video!";
-    await sendVideo(api, event.senderId, filePath, caption);
-
-  } catch(e) {
-    console.log("[YTDL] Auto-download failed:", e.message);
-    // Silently fail on auto-detect to not spam users
-  } finally {
-    cleanup(filePath);
-  }
+  console.log("[YTDL] Auto-detected YouTube link");
+  await handleDownload(api, event, event.body.trim());
 };
