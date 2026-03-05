@@ -135,19 +135,69 @@ async function initDB() {
   console.log("[AutoNews] DB ready. Mode: " + state.mode + " | " + state.posted.size + " titles loaded.");
 }
 
-// ── Fetch from RSS ────────────────────────────────────────────────────────────
-async function fetchRSS(rssUrl) {
-  const res   = await axios.get(rssUrl, { timeout: 15000 });
-  const items = (res.data && res.data.items) ? res.data.items : [];
-  return items.map(function(item) {
-    return {
-      title:       item.title,
-      description: item.description ? item.description.replace(/<[^>]*>/g, "").substring(0, 200) : "",
-      url:         item.link,
-      image:       (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail || null),
-      source:      { name: res.data.feed ? res.data.feed.title : "News" },
-    };
-  });
+// ── Fetch from RSS (tries multiple converters) ────────────────────────────────
+async function fetchRSS(rawRssUrl) {
+  // Extract the actual RSS URL from rss2json wrapper if present
+  const rssUrl = rawRssUrl.includes("rss_url=")
+    ? decodeURIComponent(rawRssUrl.split("rss_url=")[1])
+    : rawRssUrl;
+
+  // Multiple RSS-to-JSON services to try
+  const converters = [
+    "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(rssUrl),
+    "https://rss-to-json-serverless-api.vercel.app/api?feedURL=" + encodeURIComponent(rssUrl),
+    "https://api.allorigins.win/get?url=" + encodeURIComponent(rssUrl),
+  ];
+
+  for (let c = 0; c < converters.length; c++) {
+    try {
+      const res = await axios.get(converters[c], {
+        timeout: 15000,
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+
+      let items = [];
+      let feedName = "News";
+
+      // Handle allorigins (returns raw XML as string)
+      if (converters[c].includes("allorigins")) {
+        const xml = res.data && res.data.contents ? res.data.contents : "";
+        // Simple XML parse for title and link
+        const titleMatches = xml.match(/<item[^>]*>[\s\S]*?<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>|<title[^>]*>(.*?)<\/title>/gi) || [];
+        const linkMatches  = xml.match(/<link[^>]*>(.*?)<\/link>/gi) || [];
+        const imgMatches   = xml.match(/<enclosure[^>]*url="([^"]*)"[^>]*>/gi) || [];
+        for (let i = 1; i < titleMatches.length && i <= 10; i++) { // skip feed title (i=0)
+          const rawTitle = titleMatches[i].replace(/<[^>]*>/g,"").replace(/<!\[CDATA\[|\]\]>/g,"").trim();
+          const rawLink  = linkMatches[i] ? linkMatches[i].replace(/<[^>]*>/g,"").trim() : "";
+          const rawImg   = imgMatches[i-1] ? (imgMatches[i-1].match(/url="([^"]*)"/)||[])[1] : null;
+          if (rawTitle && rawLink) {
+            items.push({ title: rawTitle, description: "", url: rawLink, image: rawImg, source: { name: feedName } });
+          }
+        }
+      } else {
+        // Standard rss2json format
+        items = (res.data && res.data.items) ? res.data.items : [];
+        feedName = (res.data && res.data.feed && res.data.feed.title) ? res.data.feed.title : "News";
+        items = items.map(function(item) {
+          return {
+            title:       item.title,
+            description: item.description ? item.description.replace(/<[^>]*>/g, "").substring(0, 200) : "",
+            url:         item.link,
+            image:       (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail || null),
+            source:      { name: feedName },
+          };
+        });
+      }
+
+      if (items.length > 0) {
+        console.log("[AutoNews] RSS converter " + c + " OK: " + items.length + " articles from " + rssUrl.split("/")[2]);
+        return items;
+      }
+    } catch(e) {
+      console.log("[AutoNews] RSS converter " + c + " failed:", e.message);
+    }
+  }
+  return [];
 }
 
 // ── Fetch news based on current mode ─────────────────────────────────────────
