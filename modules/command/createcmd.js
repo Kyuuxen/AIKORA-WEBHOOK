@@ -208,21 +208,31 @@ ${code}`;
 // CODE UTILITIES
 // ══════════════════════════════════════════════════════════════════════════════
 function cleanCode(raw) {
-  return raw
-    .replace(/^```(?:javascript|js|node)?\n?/im, "")
-    .replace(/```\s*$/im, "")
-    .replace(/^Here(?:'s| is) the.*?:\n/im, "")
-    .trim();
+  let code = raw;
+  // Strip all markdown code blocks
+  code = code.replace(/```(?:javascript|js|node|json)?\n?/gi, "");
+  code = code.replace(/```/gi, "");
+  // Strip common AI preamble
+  code = code.replace(/^Here(?:'s| is) the.*?\n/im, "");
+  code = code.replace(/^Sure[!,].*?\n/im, "");
+  code = code.replace(/^This command.*?\n/im, "");
+  code = code.replace(/^Below is.*?\n/im, "");
+  // Find where actual code starts
+  const codeStart = code.search(/^(?:const|let|var|require|module\.exports|\/\/|async|function)/m);
+  if (codeStart > 0) code = code.substring(codeStart);
+  return code.trim();
 }
 
 function validateCode(code, cmdName) {
   const errors = [];
-  if (!code.includes("module.exports.config"))       errors.push("missing config export");
-  if (!code.includes("module.exports.run"))          errors.push("missing run() export");
-  if (!code.includes(`name: "${cmdName}"`))          errors.push("command name mismatch");
-  if (/require\(["']\.\.\//.test(code))             errors.push("uses local imports");
-  if (/require\(["']\.\.\/\.\.\//.test(code))       errors.push("uses config imports");
-  if (code.length < 150)                             errors.push("code too short/incomplete");
+  if (!code.includes("module.exports.config"))  errors.push("missing config export");
+  if (!code.includes("module.exports.run"))     errors.push("missing run() export");
+  // Accept both single and double quotes for name
+  const hasName = code.includes(`name: "${cmdName}"`) || code.includes(`name: '${cmdName}'`);
+  if (!hasName) errors.push("command name mismatch");
+  if (/require\([\"\']\.\.\//.test(code))         errors.push("uses local imports");
+  if (/require\([\"\']\.\.\/\.\.\//.test(code))   errors.push("uses config imports");
+  if (code.length < 150)                         errors.push("code too short/incomplete");
   return errors;
 }
 
