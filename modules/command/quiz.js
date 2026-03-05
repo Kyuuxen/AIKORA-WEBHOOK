@@ -3,11 +3,11 @@ if (!global.quizState) global.quizState = new Map();
 
 /*
 QUESTION:
-A:
-B:
-C:
-D:
-ANSWER:
+ A:
+ B:
+ C:
+ D:
+ ANSWER:
 */
 
 module.exports.config = {
@@ -19,6 +19,8 @@ module.exports.config = {
 
 module.exports.run = async function ({ api, args, event }) {
   const uid = event?.sender?.id ?? event?.senderId;
+  if (!uid) return;
+
   const first = args[0]?.toLowerCase();
 
   if (["a", "b", "c", "d"].includes(first)) {
@@ -27,14 +29,13 @@ module.exports.run = async function ({ api, args, event }) {
     global.quizState.delete(uid);
     if (first.toUpperCase() === state.correct) {
       return api.sendMessage(`✅ CORRECT!\n\n📖 ${state.explanation}`);
-    } else {
-      return api.sendMessage(
-        `❌ Wrong! Correct answer: ${state.correct}\n\n📖 ${state.explanation}`
-      );
     }
+    return api.sendMessage(
+      `❌ Wrong! Correct answer: ${state.correct}\n\n📖 ${state.explanation}`
+    );
   }
 
-  const topic = args.join(" ");
+  const topic = args.join(" ").trim();
   if (!topic) {
     return api.sendMessage("❌ Provide a topic: !quiz [topic]\nThen answer with !quiz a/b/c/d");
   }
@@ -49,6 +50,7 @@ module.exports.run = async function ({ api, args, event }) {
       },
       timeout: 30000,
     });
+
     const text = res.data?.data?.text ?? "";
     const aMatch = text.match(/ANSWER:\s*([ABCD])/i);
     const eMatch = text.match(/EXPLANATION:\s*([\s\S]+?)(?:\n\n|$)/i);
