@@ -198,8 +198,8 @@ function makeHeadlineImage(title, source) {
   return "https://og.tailgraph.com/og?fontFamily=Roboto&title=" + t + "&titleTailwind=text-white+text-4xl+font-bold&text=" + s + "&textTailwind=text-white+text-xl+mt-2&bgTailwind=bg-gray-900&footer=AIKORA+NEWS&footerTailwind=text-gray-400";
 }
 
-// ── Post to Page ─────────────────────────────────────────────────────────────
-async function postToPage(caption, imageUrl, articleUrl) {
+// ── Post to Facebook Page ─────────────────────────────────────────────────────
+async function postToFacebook(caption, imageUrl, articleUrl) {
   const pageId    = process.env.PAGE_ID;
   const feedToken = process.env.PAGE_FEED_TOKEN;
   if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
@@ -209,47 +209,11 @@ async function postToPage(caption, imageUrl, articleUrl) {
       await axios.post("https://graph.facebook.com/v19.0/" + pageId + "/photos",
         { url: imageUrl, caption: fullCaption, access_token: feedToken }, { timeout: 20000 });
       return "photo";
-    } catch(e) { console.log("[AutoNews] Page photo failed:", e.message); }
+    } catch(e) { console.log("[AutoNews] Photo failed, trying link:", e.message); }
   }
   await axios.post("https://graph.facebook.com/v19.0/" + pageId + "/feed",
     { message: fullCaption, link: articleUrl || undefined, access_token: feedToken }, { timeout: 15000 });
   return "link";
-}
-
-// ── Post to Group ─────────────────────────────────────────────────────────────
-async function postToGroup(caption, imageUrl, articleUrl) {
-  const groupId    = process.env.GROUP_ID    || "1220086550194170";
-  const groupToken = process.env.GROUP_TOKEN || process.env.PAGE_FEED_TOKEN;
-  if (!groupId || !groupToken) { console.log("[AutoNews] Group env not set, skipping."); return null; }
-  const fullCaption = caption + (articleUrl ? "\n\n🔗 Read more: " + articleUrl : "");
-  if (imageUrl) {
-    try {
-      await axios.post("https://graph.facebook.com/v19.0/" + groupId + "/photos",
-        { url: imageUrl, caption: fullCaption, access_token: groupToken }, { timeout: 20000 });
-      return "group-photo";
-    } catch(e) { console.log("[AutoNews] Group photo failed:", e.message); }
-  }
-  await axios.post("https://graph.facebook.com/v19.0/" + groupId + "/feed",
-    { message: fullCaption, link: articleUrl || undefined, access_token: groupToken }, { timeout: 15000 });
-  return "group-link";
-}
-
-// ── Post to both Page and Group ───────────────────────────────────────────────
-async function postToFacebook(caption, imageUrl, articleUrl) {
-  const results = [];
-  try {
-    const m = await postToPage(caption, imageUrl, articleUrl);
-    results.push("Page:" + m);
-  } catch(e) { results.push("Page:failed"); console.log("[AutoNews] Page failed:", e.message); }
-
-  await new Promise(function(r) { setTimeout(r, 2000); });
-
-  try {
-    const m = await postToGroup(caption, imageUrl, articleUrl);
-    if (m) results.push("Group:" + m);
-  } catch(e) { results.push("Group:failed"); console.log("[AutoNews] Group failed:", e.message); }
-
-  return results.join(" | ");
 }
 
 // ── Main post ─────────────────────────────────────────────────────────────────
