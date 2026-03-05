@@ -88,22 +88,32 @@ const DB = {
 // MULTI-AI ENGINE — tries multiple AI models for best result
 // ══════════════════════════════════════════════════════════════════════════════
 const AI_MODELS = [
-  { name: "Copilot",    url: "https://api-library-kohi.onrender.com/api/copilot",          param: "prompt", model: "default",           dataPath: "data.text" },
-  { name: "GPT-5",      url: "https://api-library-kohi.onrender.com/api/pollination-ai",   param: "prompt", model: "openai-large",       dataPath: "data"      },
-  { name: "Perplexity", url: "https://api-library-kohi.onrender.com/api/pollination-ai",   param: "prompt", model: "perplexity-reasoning", dataPath: "data"    },
+  { name: "Pollinations-GPT4",  type: "pollinations", model: "openai" },
+  { name: "Pollinations-Claude", type: "pollinations", model: "claude-hybridspace" },
+  { name: "Pollinations-Llama",  type: "pollinations", model: "llama" },
 ];
-
-function extractData(res, dataPath) {
-  return dataPath.split(".").reduce((obj, key) => obj?.[key], res.data) || "";
-}
 
 async function askAI(prompt, userId, modelIndex = 0) {
   const model = AI_MODELS[modelIndex % AI_MODELS.length];
-  const params = { [model.param]: prompt, user: userId };
-  if (model.model) params.model = model.model;
 
-  const res = await axios.get(model.url, { params, timeout: 90000 });
-  return { text: extractData(res, model.dataPath), modelName: model.name };
+  // Pollinations.ai — free, no API key, reliable
+  const res = await axios.post(
+    "https://text.pollinations.ai/",
+    {
+      messages: [{ role: "user", content: prompt }],
+      model:    model.model,
+      seed:     Math.floor(Math.random() * 9999),
+    },
+    {
+      headers: { "Content-Type": "application/json" },
+      timeout: 90000,
+    }
+  );
+
+  // Pollinations returns plain text
+  const text = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
+  console.log("[CreateCmd] " + model.name + " raw response length:", text.length);
+  return { text, modelName: model.name };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
