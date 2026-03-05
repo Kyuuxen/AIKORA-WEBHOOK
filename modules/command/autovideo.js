@@ -1,13 +1,13 @@
-const axios   = require("axios");
-const fs      = require("fs");
-const path    = require("path");
+const axios     = require("axios");
+const fs        = require("fs");
+const path      = require("path");
 const { promisify } = require("util");
 const { exec }      = require("child_process");
 const execAsync     = promisify(exec);
 
 module.exports.config = {
   name:        "autovideo",
-  description: "Auto download YouTube news videos and post directly to Facebook",
+  description: "Auto generate GMA-style news slideshow videos and post to Facebook",
   usage:       "!autovideo status | test | on | off | reset",
   category:    "Automation",
 };
@@ -15,14 +15,12 @@ module.exports.config = {
 // ── Global state ──────────────────────────────────────────────────────────────
 if (!global.autoVideoState) {
   global.autoVideoState = {
-    postedIds:   new Set(),
+    postedUrls:  new Set(),
     totalPosted: 0,
     lastPosted:  null,
     interval:    null,
     isPosting:   false,
     topicIndex:  0,
-    dlReady:     false,
-    dlMethod:    null, // "ytdlexec" | "ytdlp" | null
   };
 }
 const state = global.autoVideoState;
@@ -30,177 +28,13 @@ const state = global.autoVideoState;
 const TMP_DIR = "/tmp/autovideo";
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 
-// ── Setup downloader ──────────────────────────────────────────────────────────
-async function setupDownloader() {
-  if (state.dlReady) return true;
-
-  // Method 1: youtube-dl-exec npm package (installed via package.json)
-  try {
-    const ytdl = require("youtube-dl-exec");
-    state._ytdl   = ytdl;
-    state.dlReady = true;
-    state.dlMethod = "ytdlexec";
-    console.log("[AutoVideo] Using youtube-dl-exec");
-    return true;
-  } catch (e) {
-    console.log("[AutoVideo] youtube-dl-exec not found:", e.message);
-  }
-
-  // Method 2: yt-dlp binary via curl download
-  try {
-    await execAsync("which yt-dlp");
-    state.dlReady  = true;
-    state.dlMethod = "ytdlp";
-    console.log("[AutoVideo] yt-dlp binary found");
-    return true;
-  } catch (e) {}
-
-  try {
-    console.log("[AutoVideo] Downloading yt-dlp binary...");
-    await execAsync(
-      "curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /tmp/yt-dlp && chmod +x /tmp/yt-dlp",
-      { timeout: 60000 }
-    );
-    await execAsync("/tmp/yt-dlp --version");
-    state.dlReady  = true;
-    state.dlMethod = "ytdlp_tmp";
-    console.log("[AutoVideo] yt-dlp downloaded to /tmp");
-    return true;
-  } catch (e) {
-    console.log("[AutoVideo] yt-dlp binary download failed:", e.message);
-  }
-
-  // Method 3: pip install yt-dlp
-  try {
-    console.log("[AutoVideo] Trying pip install yt-dlp...");
-    await execAsync("pip3 install yt-dlp -q", { timeout: 90000 });
-    await execAsync("yt-dlp --version");
-    state.dlReady  = true;
-    state.dlMethod = "ytdlp";
-    console.log("[AutoVideo] yt-dlp installed via pip");
-    return true;
-  } catch (e) {
-    console.log("[AutoVideo] pip install failed:", e.message);
-  }
-
-  return false;
-}
-
-// ── Download video ────────────────────────────────────────────────────────────
-async function downloadVideo(videoUrl, videoId) {
-  const outPath = path.join(TMP_DIR, videoId + ".mp4");
-  if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
-
-  // Clean old temp files
-  try {
-    fs.readdirSync(TMP_DIR).forEach(function(f) {
-      try { fs.unlinkSync(path.join(TMP_DIR, f)); } catch(e) {}
-    });
-  } catch(e) {}
-
-  console.log("[AutoVideo] Downloading:", videoUrl);
-
-  // Method 1: youtube-dl-exec
-  if (state.dlMethod === "ytdlexec" && state._ytdl) {
-    await state._ytdl(videoUrl, {
-      noPlaylist:          true,
-      format:              "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]/best",
-      mergeOutputFormat:   "mp4",
-      output:              outPath,
-      noWarnings:          true,
-      socketTimeout:       "30",
-    });
-  } else {
-    // Method 2/3: yt-dlp binary
-    const bin = state.dlMethod === "ytdlp_tmp" ? "/tmp/yt-dlp" : "yt-dlp";
-    const cmd = [
-      bin,
-      "--no-playlist",
-      "--max-filesize", "80M",
-      "-f", "\"bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]/best\"",
-      "--merge-output-format", "mp4",
-      "-o", outPath,
-      "--no-warnings",
-      "--socket-timeout", "30",
-      videoUrl
-    ].join(" ");
-    await execAsync(cmd, { timeout: 120000 });
-  }
-
-  if (!fs.existsSync(outPath)) throw new Error("Download failed — file not created");
-  const stats = fs.statSync(outPath);
-  if (stats.size < 10000) throw new Error("File too small — download failed");
-  console.log("[AutoVideo] Downloaded: " + (stats.size/1024/1024).toFixed(1) + "MB");
-  return outPath;
-}
-
-// ── Upload to Facebook (chunked) ──────────────────────────────────────────────
-async function uploadToFacebook(filePath, title, caption) {
-  const pageId    = process.env.PAGE_ID;
-  const feedToken = process.env.PAGE_FEED_TOKEN;
-  if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
-
-  const fileSize = fs.statSync(filePath).size;
-  console.log("[AutoVideo] Uploading " + (fileSize/1024/1024).toFixed(1) + "MB to Facebook...");
-
-  // Init upload session
-  const initRes = await axios.post(
-    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
-    null,
-    {
-      params: { upload_phase: "start", file_size: fileSize, access_token: feedToken },
-      timeout: 30000,
-    }
-  );
-
-  const sessionId = initRes.data.upload_session_id;
-  console.log("[AutoVideo] Upload session:", sessionId);
-
-  // Upload in 5MB chunks
-  const CHUNK  = 5 * 1024 * 1024;
-  const buffer = fs.readFileSync(filePath);
-  let offset   = 0;
-
-  while (offset < fileSize) {
-    const chunk   = buffer.slice(offset, Math.min(offset + CHUNK, fileSize));
-    const chunkRes = await axios.post(
-      "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
-      chunk,
-      {
-        params: {
-          upload_phase:      "transfer",
-          upload_session_id: sessionId,
-          start_offset:      offset,
-          access_token:      feedToken,
-        },
-        headers: { "Content-Type": "application/octet-stream" },
-        timeout: 120000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-      }
-    );
-    offset = parseInt(chunkRes.data.start_offset) || (offset + chunk.length);
-    console.log("[AutoVideo] Upload: " + Math.round((offset/fileSize)*100) + "%");
-  }
-
-  // Finish upload
-  await axios.post(
-    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
-    null,
-    {
-      params: {
-        upload_phase:      "finish",
-        upload_session_id: sessionId,
-        title:             title.substring(0, 100),
-        description:       caption.substring(0, 500),
-        access_token:      feedToken,
-      },
-      timeout: 60000,
-    }
-  );
-
-  console.log("[AutoVideo] Upload complete!");
-}
+// ── Config ────────────────────────────────────────────────────────────────────
+const LOGO_URL    = "https://i.ibb.co/nxXsv5M/file-000000000e907206aa347a1de1d8d10a.png";
+const VIDEO_DUR   = 60;   // seconds
+const SLIDE_DUR   = 5;    // seconds per image
+const IMG_COUNT   = Math.floor(VIDEO_DUR / SLIDE_DUR); // 12 images
+const MUSIC_URL   = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"; // royalty free
+const PAGE_NAME   = "AIKORA NEWS";
 
 // ── Topics ────────────────────────────────────────────────────────────────────
 const TOPICS = [
@@ -209,100 +43,335 @@ const TOPICS = [
   "business news today", "science news today", "health news today", "viral news today",
 ];
 
-// ── Search YouTube ────────────────────────────────────────────────────────────
-async function searchYouTube(query) {
-  const apiKey = process.env.YOUTUBE_API_KEY;
-  if (apiKey) {
-    try {
-      const res = await axios.get("https://www.googleapis.com/youtube/v3/search", {
-        params: {
-          key: apiKey, q: query, part: "snippet", type: "video",
-          order: "date", maxResults: 10, videoDuration: "short",
-          publishedAfter: new Date(Date.now() - 48*60*60*1000).toISOString(),
-        },
-        timeout: 15000,
-      });
-      return ((res.data && res.data.items) ? res.data.items : []).map(function(item) {
-        return { id: item.id.videoId, title: item.snippet.title, channel: item.snippet.channelTitle, url: "https://www.youtube.com/watch?v=" + item.id.videoId };
-      });
-    } catch (e) { console.log("[AutoVideo] YouTube API failed:", e.message); }
-  }
-  // Invidious fallback
-  const instances = ["https://invidious.snopyta.org", "https://vid.puffyan.us", "https://invidious.kavin.rocks"];
-  for (let i = 0; i < instances.length; i++) {
-    try {
-      const res = await axios.get(instances[i] + "/api/v1/search", { params: { q: query, type: "video", sort_by: "upload_date" }, timeout: 10000 });
-      if (Array.isArray(res.data) && res.data.length > 0) {
-        return res.data.slice(0, 10).map(function(item) {
-          return { id: item.videoId, title: item.title, channel: item.author, url: "https://www.youtube.com/watch?v=" + item.videoId };
-        });
-      }
-    } catch (e) {}
-  }
-  return [];
+// ── Fetch news articles ───────────────────────────────────────────────────────
+async function fetchNews() {
+  try {
+    const res = await axios.get("https://gnews.io/api/v4/top-headlines", {
+      params: { lang: "en", country: "ph", max: 10, apikey: process.env.GNEWS_API_KEY || "demo" },
+      timeout: 15000,
+    });
+    return (res.data && res.data.articles) ? res.data.articles : [];
+  } catch (e) {}
+  try {
+    const res = await axios.get(
+      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml",
+      { timeout: 15000 }
+    );
+    return ((res.data && res.data.items) ? res.data.items : []).map(function(item) {
+      return {
+        title:       item.title,
+        description: item.description ? item.description.replace(/<[^>]*>/g,"").substring(0,200) : "",
+        url:         item.link,
+        image:       (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail||null),
+        source:      { name: "BBC News" },
+      };
+    });
+  } catch (e) { return []; }
 }
 
-// ── Generate caption ──────────────────────────────────────────────────────────
-async function generateCaption(video) {
+// ── Pick fresh article ────────────────────────────────────────────────────────
+function pickFresh(articles) {
+  for (let i = 0; i < articles.length; i++) {
+    if (articles[i].url && !state.postedUrls.has(articles[i].url)) return articles[i];
+  }
+  return null;
+}
+
+// ── Download file to disk ─────────────────────────────────────────────────────
+async function downloadFile(url, dest) {
+  const res = await axios.get(url, { responseType: "arraybuffer", timeout: 30000 });
+  fs.writeFileSync(dest, Buffer.from(res.data));
+}
+
+// ── Get images for slideshow ──────────────────────────────────────────────────
+// Uses Pexels API or article images
+async function getImages(article, count) {
+  const images = [];
+  const tmpImages = [];
+
+  // Try article image first
+  if (article.image || article.urlToImage) {
+    try {
+      const imgUrl  = article.image || article.urlToImage;
+      const imgPath = path.join(TMP_DIR, "img0.jpg");
+      await downloadFile(imgUrl, imgPath);
+      images.push(imgPath);
+      tmpImages.push(imgPath);
+    } catch(e) {}
+  }
+
+  // Fill remaining slots with Pexels images based on topic keywords
+  const pexelsKey = process.env.PEXELS_API_KEY;
+  if (pexelsKey && images.length < count) {
+    try {
+      const query   = article.title.split(" ").slice(0,3).join(" ");
+      const res     = await axios.get("https://api.pexels.com/v1/search", {
+        params: { query: query, per_page: count, orientation: "landscape" },
+        headers: { Authorization: pexelsKey },
+        timeout: 15000,
+      });
+      const photos  = (res.data && res.data.photos) ? res.data.photos : [];
+      for (let i = 0; i < photos.length && images.length < count; i++) {
+        try {
+          const imgPath = path.join(TMP_DIR, "img" + images.length + ".jpg");
+          await downloadFile(photos[i].src.large, imgPath);
+          images.push(imgPath);
+          tmpImages.push(imgPath);
+        } catch(e) {}
+      }
+    } catch(e) { console.log("[AutoVideo] Pexels failed:", e.message); }
+  }
+
+  // Fallback: generate solid color images with ffmpeg if we don't have enough
+  while (images.length < count) {
+    const colors  = ["#1a1a2e","#16213e","#0f3460","#1a1a2e","#0d0d0d"];
+    const color   = colors[images.length % colors.length];
+    const imgPath = path.join(TMP_DIR, "img" + images.length + ".jpg");
+    await execAsync(
+      'ffmpeg -f lavfi -i "color=c=' + color.replace("#","") + ':size=1280x720:rate=1" -frames:v 1 ' + imgPath + ' -y',
+      { timeout: 15000 }
+    );
+    images.push(imgPath);
+    tmpImages.push(imgPath);
+  }
+
+  return images;
+}
+
+// ── Download background music ─────────────────────────────────────────────────
+async function getMusic() {
+  const musicPath = path.join(TMP_DIR, "music.mp3");
+  // Use a different royalty-free track each time
+  const tracks = [
+    "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+    "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+    "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
+  ];
+  const track = tracks[state.totalPosted % tracks.length];
   try {
-    const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
-      params: { prompt: "Write a short engaging Facebook caption for this news video (2-3 sentences, no hashtags, no asterisks):\n\nTitle: " + video.title + "\nChannel: " + video.channel },
-      timeout: 25000,
-    });
-    const r = (res.data && res.data.data && res.data.data.text) ? res.data.data.text : null;
-    if (r && r.length > 20) return r.replace(/\*\*/g, "").replace(/\*/g, "").trim();
-  } catch (e) {}
-  return video.title;
+    await downloadFile(track, musicPath);
+    return musicPath;
+  } catch(e) {
+    console.log("[AutoVideo] Music download failed:", e.message);
+    return null;
+  }
+}
+
+// ── Download logo ─────────────────────────────────────────────────────────────
+async function getLogo() {
+  const logoPath = path.join(TMP_DIR, "logo.png");
+  if (fs.existsSync(logoPath)) return logoPath; // reuse if already downloaded
+  try {
+    await downloadFile(LOGO_URL, logoPath);
+    return logoPath;
+  } catch(e) {
+    console.log("[AutoVideo] Logo download failed:", e.message);
+    return null;
+  }
+}
+
+// ── Generate GMA-style news video with ffmpeg ─────────────────────────────────
+async function generateVideo(article, images, musicPath, logoPath) {
+  const outPath   = path.join(TMP_DIR, "output.mp4");
+  if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+
+  const headline  = article.title.replace(/'/g, "").replace(/"/g,"").replace(/:/g,"-").substring(0, 80);
+  const source    = ((article.source && article.source.name) ? article.source.name : "NEWS").toUpperCase();
+  const dateStr   = new Date().toLocaleDateString("en-PH", { month: "long", day: "numeric", year: "numeric" });
+
+  // Build ffmpeg input list (each image shown for SLIDE_DUR seconds)
+  let inputs      = "";
+  let filterParts = [];
+  let scaleOverlay = [];
+
+  // Scale and prepare each image
+  for (let i = 0; i < images.length; i++) {
+    inputs += ' -loop 1 -t ' + SLIDE_DUR + ' -i "' + images[i] + '"';
+    filterParts.push('[' + i + ':v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,setsar=1[v' + i + ']');
+  }
+
+  // Concatenate all image clips
+  const concatIn  = images.map(function(_,i){ return '[v'+i+']'; }).join('');
+  filterParts.push(concatIn + 'concat=n=' + images.length + ':v=1:a=0[base]');
+
+  // Add logo watermark (top left, scaled to 120px wide)
+  if (logoPath && fs.existsSync(logoPath)) {
+    filterParts.push('[base][' + images.length + ':v]overlay=20:20:format=auto[withlogo]');
+    inputs += ' -i "' + logoPath + '"';
+  } else {
+    filterParts.push('[base]copy[withlogo]');
+  }
+
+  // GMA-style lower third bar:
+  // Dark semi-transparent bar at bottom + white headline text + red accent + source tag
+  const drawtext = [
+    // Dark bar background
+    "drawbox=x=0:y=620:w=1280:h=100:color=black@0.85:t=fill",
+    // Red accent line
+    "drawbox=x=0:y=618:w=1280:h=4:color=red@1:t=fill",
+    // Page name top-left of bar (small, red)
+    "drawtext=text='" + PAGE_NAME + "':fontcolor=red:fontsize=18:x=20:y=630:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    // Date top-right of bar
+    "drawtext=text='" + dateStr + "':fontcolor=white@0.7:fontsize=16:x=w-tw-20:y=630:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    // Main headline (large white text)
+    "drawtext=text='" + headline + "':fontcolor=white:fontsize=26:x=20:y=655:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:line_spacing=4",
+    // Source tag (right side)
+    "drawtext=text='" + source + "':fontcolor=yellow:fontsize=18:x=w-tw-20:y=658:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+  ].join(",");
+
+  filterParts.push('[withlogo]' + drawtext + '[final]');
+
+  const filterComplex = filterParts.join('; ');
+
+  // Build full ffmpeg command
+  let cmd = 'ffmpeg -y' + inputs;
+
+  if (musicPath && fs.existsSync(musicPath)) {
+    cmd += ' -i "' + musicPath + '"';
+    const audioIndex = logoPath ? images.length + 2 : images.length + 1;
+    cmd += ' -filter_complex "' + filterComplex + '"';
+    cmd += ' -map "[final]"';
+    cmd += ' -map ' + audioIndex + ':a';
+    cmd += ' -c:v libx264 -preset fast -crf 23';
+    cmd += ' -c:a aac -b:a 128k';
+    cmd += ' -t ' + VIDEO_DUR;
+    cmd += ' -af "volume=0.3,afade=t=out:st=' + (VIDEO_DUR-3) + ':d=3"'; // fade out music
+    cmd += ' -shortest';
+  } else {
+    cmd += ' -filter_complex "' + filterComplex + '"';
+    cmd += ' -map "[final]"';
+    cmd += ' -c:v libx264 -preset fast -crf 23';
+    cmd += ' -t ' + VIDEO_DUR;
+    cmd += ' -an'; // no audio
+  }
+
+  cmd += ' "' + outPath + '"';
+
+  console.log("[AutoVideo] Running ffmpeg...");
+  await execAsync(cmd, { timeout: 300000, maxBuffer: 50 * 1024 * 1024 }); // 5 min timeout
+
+  if (!fs.existsSync(outPath)) throw new Error("ffmpeg failed — output not created");
+  const size = (fs.statSync(outPath).size / 1024 / 1024).toFixed(1);
+  console.log("[AutoVideo] Video generated: " + size + "MB");
+  return outPath;
+}
+
+// ── Upload video to Facebook ──────────────────────────────────────────────────
+async function uploadToFacebook(filePath, title, caption) {
+  const pageId    = process.env.PAGE_ID;
+  const feedToken = process.env.PAGE_FEED_TOKEN;
+  if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
+
+  const fileSize  = fs.statSync(filePath).size;
+  console.log("[AutoVideo] Uploading " + (fileSize/1024/1024).toFixed(1) + "MB to Facebook...");
+
+  // Init
+  const initRes = await axios.post(
+    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos", null,
+    { params: { upload_phase: "start", file_size: fileSize, access_token: feedToken }, timeout: 30000 }
+  );
+  const sessionId = initRes.data.upload_session_id;
+
+  // Upload chunks
+  const CHUNK  = 5 * 1024 * 1024;
+  const buffer = fs.readFileSync(filePath);
+  let offset   = 0;
+  while (offset < fileSize) {
+    const chunk    = buffer.slice(offset, Math.min(offset + CHUNK, fileSize));
+    const chunkRes = await axios.post(
+      "https://graph-video.facebook.com/v19.0/" + pageId + "/videos", chunk,
+      {
+        params: { upload_phase: "transfer", upload_session_id: sessionId, start_offset: offset, access_token: feedToken },
+        headers: { "Content-Type": "application/octet-stream" },
+        timeout: 120000, maxBodyLength: Infinity, maxContentLength: Infinity,
+      }
+    );
+    offset = parseInt(chunkRes.data.start_offset) || (offset + chunk.length);
+    console.log("[AutoVideo] Upload: " + Math.round((offset/fileSize)*100) + "%");
+  }
+
+  // Finish
+  await axios.post(
+    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos", null,
+    {
+      params: {
+        upload_phase: "finish", upload_session_id: sessionId,
+        title: title.substring(0,100), description: caption.substring(0,500),
+        access_token: feedToken,
+      },
+      timeout: 60000,
+    }
+  );
+  console.log("[AutoVideo] Upload complete!");
 }
 
 // ── Cleanup ───────────────────────────────────────────────────────────────────
-function cleanup(filePath) {
-  try { if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch(e) {}
+function cleanTmp() {
+  try {
+    fs.readdirSync(TMP_DIR).forEach(function(f) {
+      if (f !== "logo.png") { // keep logo cached
+        try { fs.unlinkSync(path.join(TMP_DIR, f)); } catch(e) {}
+      }
+    });
+  } catch(e) {}
+}
+
+// ── Generate AI caption ───────────────────────────────────────────────────────
+async function generateCaption(article) {
+  try {
+    const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
+      params: { prompt: "Write a short engaging Facebook post caption for this news video (2-3 sentences, no hashtags, no asterisks, no markdown):\n\nHeadline: " + article.title },
+      timeout: 25000,
+    });
+    const r = (res.data && res.data.data && res.data.data.text) ? res.data.data.text : null;
+    if (r && r.length > 20) return r.replace(/\*\*/g,"").replace(/\*/g,"").trim();
+  } catch(e) {}
+  return article.title;
 }
 
 // ── Main auto post ────────────────────────────────────────────────────────────
 async function autoPost(notifyFn) {
-  if (state.isPosting) { notifyFn("⏳ Still posting, skipping..."); return; }
+  if (state.isPosting) { notifyFn("⏳ Still generating, skipping..."); return; }
   state.isPosting = true;
-  let filePath = null;
 
   try {
-    // Setup downloader
-    const ready = await setupDownloader();
-    if (!ready) { notifyFn("❌ No download method available. Add youtube-dl-exec to package.json!"); return; }
+    // Fetch news
+    const articles = await fetchNews();
+    if (!articles.length) { notifyFn("⚠️ No articles found."); return; }
 
-    // Search
-    const topic = TOPICS[state.topicIndex % TOPICS.length];
-    state.topicIndex++;
-    const videos = await searchYouTube(topic);
-    if (!videos.length) { notifyFn("⚠️ No videos found for: " + topic); return; }
-
-    // Pick fresh
-    let video = null;
-    for (let i = 0; i < videos.length; i++) {
-      if (!state.postedIds.has(videos[i].id)) { video = videos[i]; break; }
+    let article = pickFresh(articles);
+    if (!article) {
+      state.postedUrls.clear();
+      article = articles[0];
     }
-    if (!video) { notifyFn("⚠️ All videos already posted. Next cycle will try different topic."); return; }
 
-    state.postedIds.add(video.id);
-    notifyFn("📥 Downloading: " + video.title + "\n⏳ Please wait 1-3 minutes...");
+    state.postedUrls.add(article.url);
+    notifyFn("📰 Generating video for: " + article.title + "\n⏳ This takes 2-4 minutes...");
 
-    filePath = await downloadVideo(video.url, video.id);
-    const caption = await generateCaption(video);
+    // Prepare assets
+    const [images, musicPath, logoPath] = await Promise.all([
+      getImages(article, IMG_COUNT),
+      getMusic(),
+      getLogo(),
+    ]);
+
+    notifyFn("🎬 Rendering GMA-style video with ffmpeg...");
+    const videoPath = await generateVideo(article, images, musicPath, logoPath);
+
+    const caption = await generateCaption(article);
 
     notifyFn("📤 Uploading to Facebook...");
-    await uploadToFacebook(filePath, video.title, caption);
+    await uploadToFacebook(videoPath, article.title, caption);
 
     state.totalPosted++;
     state.lastPosted = new Date().toISOString();
-    notifyFn("✅ Video posted directly: " + video.title);
+    notifyFn("✅ News video posted: " + article.title);
 
   } catch (err) {
-    // Remove from posted so it can retry
     notifyFn("❌ Failed: " + err.message);
     console.error("[AutoVideo] Error:", err.message);
   } finally {
-    cleanup(filePath);
+    cleanTmp();
     state.isPosting = false;
   }
 }
@@ -311,20 +380,20 @@ async function autoPost(notifyFn) {
 function startAutoVideo() {
   if (state.interval) return;
   if (!process.env.PAGE_ID || !process.env.PAGE_FEED_TOKEN) {
-    console.log("[AutoVideo] Not started: Missing env vars.");
+    console.log("[AutoVideo] Not started: Missing PAGE_ID or PAGE_FEED_TOKEN.");
     return;
   }
-  console.log("[AutoVideo] Starting...");
-  setTimeout(function() { autoPost(function(msg) { console.log("[AutoVideo]", msg); }); }, 3 * 60 * 1000);
-  state.interval = setInterval(function() { autoPost(function(msg) { console.log("[AutoVideo]", msg); }); }, 45 * 60 * 1000);
+  console.log("[AutoVideo] Starting GMA-style news video generator...");
+  setTimeout(function() { autoPost(function(msg) { console.log("[AutoVideo]", msg); }); }, 5 * 60 * 1000);
+  state.interval = setInterval(function() { autoPost(function(msg) { console.log("[AutoVideo]", msg); }); }, 60 * 60 * 1000); // every 1 hour
 }
 
 startAutoVideo();
 
-// ── Command (admin only) ──────────────────────────────────────────────────────
+// ── Command ───────────────────────────────────────────────────────────────────
 module.exports.run = async function ({ api, args, event }) {
   const uid     = event.senderId;
-  const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
+  const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id){ return id.trim(); }).filter(Boolean);
   const isAdmin = ADMINS.length === 0 || ADMINS.includes(uid);
 
   if (!isAdmin) return api.send("⛔ This command is for admins only!");
@@ -333,24 +402,27 @@ module.exports.run = async function ({ api, args, event }) {
 
   if (action === "status") {
     return api.send(
-      "📺 AutoVideo Status\n━━━━━━━━━━━━━━\n" +
-      "Status: "      + (state.interval ? "🟢 Running" : "🔴 Stopped") + "\n" +
-      "Downloader: "  + (state.dlReady ? "✅ " + state.dlMethod : "⏳ Not ready") + "\n" +
-      "YouTube API: " + (process.env.YOUTUBE_API_KEY ? "✅ Connected" : "⚠️ Using fallback") + "\n" +
-      "Total posted: " + state.totalPosted + "\n" +
-      "Last posted: " + (state.lastPosted ? new Date(state.lastPosted).toLocaleString() : "Never") + "\n" +
-      "Next topic: "  + TOPICS[state.topicIndex % TOPICS.length]
+      "📺 AutoVideo (GMA Style)\n━━━━━━━━━━━━━━\n" +
+      "Status: "        + (state.interval ? "🟢 Running" : "🔴 Stopped") + "\n" +
+      "Total posted: "  + state.totalPosted + "\n" +
+      "Last posted: "   + (state.lastPosted ? new Date(state.lastPosted).toLocaleString() : "Never") + "\n" +
+      "Interval: Every 1 hour\n" +
+      "Video length: 60 seconds\n" +
+      "Style: GMA News lower third\n" +
+      "Logo: " + (LOGO_URL ? "✅ Set" : "❌ Not set") + "\n" +
+      "Music: ✅ Royalty free\n" +
+      "Pexels: " + (process.env.PEXELS_API_KEY ? "✅ Connected" : "⚠️ Not set (using article images)")
     );
   }
   if (action === "test") {
-    api.send("🧪 Starting download + upload...\n⏳ Takes 1-3 minutes...");
+    api.send("🎬 Generating GMA-style news video...\n⏳ Takes 2-4 minutes, please wait...");
     await autoPost(function(msg) { api.send(msg); });
     return;
   }
   if (action === "on") {
     if (state.interval) return api.send("Already running!");
     startAutoVideo();
-    return api.send("✅ AutoVideo started!");
+    return api.send("✅ AutoVideo started! Posts every 1 hour.");
   }
   if (action === "off") {
     if (!state.interval) return api.send("Already stopped!");
@@ -359,7 +431,7 @@ module.exports.run = async function ({ api, args, event }) {
     return api.send("🔴 AutoVideo stopped.");
   }
   if (action === "reset") {
-    state.postedIds.clear();
+    state.postedUrls.clear();
     return api.send("🔄 History cleared!");
   }
   api.send("!autovideo status | test | on | off | reset");
