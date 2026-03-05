@@ -178,42 +178,107 @@ async function uploadToFacebook(filePath, title, caption) {
   if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
 
   const fileSize = fs.statSync(filePath).size;
-  console.log("[AutoVideo] Uploading " + (fileSize/1024/1024).toFixed(1) + "MB...");
+  console.log("[AutoVideo] File size: " + (fileSize/1024/1024).toFixed(2) + "MB");
 
+  if (fileSize < 1024) throw new Error("Video file too small: " + fileSize + " bytes - ffmpeg likely failed");
+
+  // Method 1: Simple single POST upload (works for files under 1GB)
+  try {
+    const FormData = require("form-data");
+    const form     = new FormData();
+    form.append("title",        title.substring(0, 100));
+    form.append("description",  caption.substring(0, 500));
+    form.append("access_token", feedToken);
+    form.append("source",       fs.createReadStream(filePath), {
+      filename:    "video.mp4",
+      contentType: "video/mp4",
+    });
+
+    const res = await axios.post(
+      "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
+      form,
+      {
+        headers: form.getHeaders(),
+        timeout: 120000,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      }
+    );
+    console.log("[AutoVideo] Upload complete! Video ID:", res.data.id || "unknown");
+    return;
+  } catch (e) {
+    const fbErr = e.response && e.response.data ? JSON.stringify(e.response.data) : e.message;
+    console.log("[AutoVideo] Simple upload failed:", fbErr, "- trying chunked...");
+  }
+
+  // Method 2: Chunked upload fallback
+  console.log("[AutoVideo] Trying chunked upload...");
   const initRes = await axios.post(
-    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos", null,
-    { params: { upload_phase: "start", file_size: fileSize, access_token: feedToken }, timeout: 30000 }
+    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
+    null,
+    {
+      params: {
+        upload_phase:  "start",
+        file_size:     fileSize,
+        access_token:  feedToken,
+      },
+      timeout: 30000,
+    }
   );
+
+  if (!initRes.data || !initRes.data.upload_session_id) {
+    throw new Error("Failed to start upload session: " + JSON.stringify(initRes.data));
+  }
+
   const sessionId = initRes.data.upload_session_id;
+  console.log("[AutoVideo] Session:", sessionId);
 
   const CHUNK  = 3 * 1024 * 1024;
   const buffer = fs.readFileSync(filePath);
   let offset   = 0;
+
   while (offset < fileSize) {
-    const chunk    = buffer.slice(offset, Math.min(offset + CHUNK, fileSize));
+    const end      = Math.min(offset + CHUNK, fileSize);
+    const chunk    = buffer.slice(offset, end);
     const chunkRes = await axios.post(
-      "https://graph-video.facebook.com/v19.0/" + pageId + "/videos", chunk,
+      "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
+      chunk,
       {
-        params: { upload_phase: "transfer", upload_session_id: sessionId, start_offset: offset, access_token: feedToken },
-        headers: { "Content-Type": "application/octet-stream" },
-        timeout: 60000, maxBodyLength: Infinity, maxContentLength: Infinity,
+        params: {
+          upload_phase:      "transfer",
+          upload_session_id: sessionId,
+          start_offset:      offset,
+          access_token:      feedToken,
+        },
+        headers: {
+          "Content-Type":   "application/octet-stream",
+          "Content-Length": chunk.length,
+        },
+        timeout: 60000,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
       }
     );
-    offset = parseInt(chunkRes.data.start_offset) || (offset + chunk.length);
+    const nextOffset = parseInt(chunkRes.data && chunkRes.data.start_offset);
+    offset = isNaN(nextOffset) ? end : nextOffset;
+    console.log("[AutoVideo] Upload: " + Math.round((offset/fileSize)*100) + "%");
   }
 
-  await axios.post(
-    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos", null,
+  const finishRes = await axios.post(
+    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
+    null,
     {
       params: {
-        upload_phase: "finish", upload_session_id: sessionId,
-        title: title.substring(0, 100), description: caption.substring(0, 500),
-        access_token: feedToken,
+        upload_phase:      "finish",
+        upload_session_id: sessionId,
+        title:             title.substring(0, 100),
+        description:       caption.substring(0, 500),
+        access_token:      feedToken,
       },
       timeout: 60000,
     }
   );
-  console.log("[AutoVideo] Upload complete!");
+  console.log("[AutoVideo] Chunked upload complete!", JSON.stringify(finishRes.data));
 }
 
 // ── Fetch news ────────────────────────────────────────────────────────────────
