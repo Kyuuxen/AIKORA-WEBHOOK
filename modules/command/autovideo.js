@@ -31,11 +31,10 @@ if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 
 // ── Safe text ─────────────────────────────────────────────────────────────────
 function safeText(str) {
-  const text = String(str)
+  return String(str)
     .replace(/['"\\:[\]]/g, " ")
     .replace(/[^\x20-\x7E]/g, "")
     .trim();
-  return text.length > 15 ? text.substring(0, 15) + "..." : text;
 }
 
 // ── Rewrite headline via Copilot ───────────────────────────────────────────────
@@ -60,6 +59,15 @@ async function rewriteHeadline(title) {
   } catch (e) {}
 
   return safeText(title);
+}
+
+// ── Split headline into 2 lines ───────────────────────────────────────────────
+function splitHeadline(text) {
+  const words = text.split(" ");
+  const mid = Math.ceil(words.length / 2);
+  const line1 = words.slice(0, mid).join(" ");
+  const line2 = words.slice(mid).join(" ");
+  return [line1, line2];
 }
 
 // ── Download file ─────────────────────────────────────────────────────────────
@@ -122,13 +130,16 @@ async function generateVideo(article, imageUrl, musicPath, logoPath) {
   const t1Y   = 273;
   const t2Y   = 295;
 
+  const [line1, line2] = splitHeadline(headline);
+
   const drawText = [
     "drawbox=x=0:y=" + barY  + ":w=640:h=95:color=black@0.85:t=fill",
     "drawbox=x=0:y=" + lineY + ":w=640:h=4:color=red:t=fill",
     "drawtext=text='" + PAGE_NAME + "':fontcolor=red:fontsize=20:x=10:y=" + t1Y,
     "drawtext=text='" + dateStr   + "':fontcolor=white@0.7:fontsize=16:x=w-tw-10:y=" + t1Y,
-    "drawtext=text='" + headline  + "':fontcolor=white:fontsize=26:x=10:y=" + t2Y,
-    "drawtext=text='" + source    + "':fontcolor=yellow:fontsize=18:x=w-tw-10:y=" + t2Y
+    "drawtext=text='" + line1     + "':fontcolor=white:fontsize=26:x=10:y=" + t2Y,
+    "drawtext=text='" + line2     + "':fontcolor=white:fontsize=26:x=10:y=" + (t2Y + 28),
+    "drawtext=text='" + source    + "':fontcolor=yellow:fontsize=18:x=w-tw-10:y=" + (t2Y + 28)
   ].join(",");
 
   let cmd;
