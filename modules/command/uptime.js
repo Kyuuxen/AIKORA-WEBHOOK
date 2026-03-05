@@ -7,7 +7,7 @@ module.exports.config = {
   category: "general",
 };
 
-module.exports.run = async function ({ api, args, event }) {
+module. = async function ({ api, args, event }) {
   if (args.length !== 0) return api.send("Usage: !uptime");
   try {
     const totalSec = Math.floor(process.uptime());
