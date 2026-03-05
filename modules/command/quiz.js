@@ -1,160 +1,151 @@
-const axios = require('axios');
-
-if (!global.quizState) global.quizState = new Map();
-
-const options = {
-  method: 'GET',
-  url: 'https://www.thetalko.com/', // replace with your external source URL
-};
-
-const questions = [
-  `BCE: QUESTION: In Bluetooth 5.2 the lowest interleaved bit rate period was meant for the purpose of:
-  | A: TRANSPORT POWER STATS
-  | B: EAX (EXTENDABLE ATTRIBUTE) MAC HEADERS
-  | C: SUGGESTED CONNECTION PARAMETERS
-  | D: AD ATTACHMENT LENGTH PER CHANNEL
-  ANSWER: C
-  EXPLANATION: R02 TMPTODISMIS
-  `,
-  `PCIe: QUESTION: What does PCIE say with its “TB”?
-  | A: TRANSACTION BLOCK
-  | B: PACKET header
-  | C: PAYLOAD
-  | D: TRANSMISSION BLOCK
-  ANSWER: A
-  EXPLANATION: TBCUCC3F5
-  `,
-  `FTP: QUESTION: What was the first protocol you saw in the website screenshot above?
-  | A: SMTP
-  | B: CURL
-  | C: PIXELMQ
-  | D: FTP
-  ANSWER: D
-  EXPLANATION: 1438934732 * * 2021 06 22 15 38 33 14 un 
-  `,
-  `Pytorch: QUESTION: The difference between this two code is you can call the submodule from one of these. Use your own way.
-  | A:  model.target(in);  ----
-  | B : after in = nn.GRU( 128, x, 10, batch_first = True);  ----   object==var name--> 
-  | C:  submodule (i.e. variable instance)  
-  | D: NO-OUTPUT
-  ANSWER: C
-  EXPLANATION: 1c2c2c
-  `,
-  `ELEPHANT: QUESTION: Average think.duration.time value from studenta (mock) database temporal?
-  | A: 1.23901
-  | B: 1.23917
-  | C: 1.23712
-  | D: 1.23902
-  ANSWER: B
-  EXPLANATION: 2021 2021-06-22 2021-06-22 15 20221c2c2cCOCOCOCO
-  `,
-  `V8:QUESTION: What is the answer in this scenario?
-  | A: Explicit error
-  | B: We don't want to define it.
-  | C: Explain what we should follow. 
-  | D: ANS(ER)
-  ANSWER: D
-`,
-];
-
-module.exports.run = async (api, event, args) => {
-  const uid = event?.sender?.id?.toString();
-  if (!uid) return;
-  const globalVal = global.quizState;
-
-  if (Array.isArray(args) && ['a', 'b', 'c', 'd'].includes(args[0]?.toLowerCase())) {
-    const state = globalVal.get(uid);
-    if (!state) return;
-    const first = args[0];
-    const isCorrect = first.toUpperCase() === state.correct;
-
-    const message = isCorrect
-      ? '🎉 Correct!'
-      : `❌ Oops, The correct answer was ${state.correct}`;
-    globalVal.delete(uid);
-    await api.sendMessage(
-      {
-        body: `${message}\n\n${state.question}`,
-        attachments: [
-          {
-            contentType: 'application/json',
-            attachment: Buffer.from(JSON.stringify(state.question)),
-            name: 'quiz-question.json',
-          },
-        ],
-      },
-      { to: uid },
-    );
-    return;
-  }
-
-  if (globalVal.has(uid)) {
-    await api.sendMessage('⚠️ You already have quiz questions in your queue! Abeg, reply with one of the options to see if you are correct', { to: uid });
-    return;
-  }
-
-  let local;
-  try {
-    const r = await axios(options);
-    local = r.data.split('###')[1].split('---');
-  } catch (_) {
-    local = questions;
-  }
-
-  if (!local?.length) return;
-
-  const localIndex = Math.floor(Math.random() * local.length);
-  const localItem = local[localIndex];
-
-  const topicIndex = localItem.indexOf(':');
-  const currentTopic = localItem.slice(0, topicIndex);
-  const text = localItem.slice(topicIndex + 1);
-
-  const answerMatch = text.match(/ANSWER:\s*([A-D])/i);
-  const answer = answerMatch ? answerMatch[1].toUpperCase() : '';
-
-  const textWithoutAns = text.replace(/ANSWER:\s*[A-D].*/i, '');
-
-  const explanationMatch = textWithoutAns.match(/EXPLANATION:\s*([\s\S]+?)(?:\n{2,}|$)/i);
-  const explanation = explanationMatch ? explanationMatch[1].trim() : '';
-
-  const cleanText = textWithoutAns
-    .replace(/^QUESTION:\s*/i, '')
-    .replace(/([ABCD]):/g, '$1: ');
-
-  globalVal.set(uid, {
-    question: `${currentTopic} ${cleanText}\n\n${explanation || ''}`.trim(),
-    correct: answer,
-  });
-
-  const uiMessage = `Hey ${event?.sender?.firstName || 'there'} 👋
-Here is your quiz question! Reply with one of the following options to determine your knowledge level:
-           
-${cleanText}
-  `;
-
-  await api.sendMessage({
-    body: uiMessage,
-    attachments: [
-      {
-        contentType: 'application/json',
-        attachment: Buffer.from(JSON.stringify(cleanText)),
-        name: 'quiz-question.json',
-      },
-    ],
-  }, { to: uid });
-};
+const axios = require("axios");
 
 module.exports.config = {
-  name: 'quiz',
-  version: '1.0',
-  role: 0,
-  author: 'ChatGPT',
-  shortDescription: 'Quiz Bot Command',
-  longDescription: 'Provides a random quiz question from a set of topics. Users can reply with A, B, C, or D to answer.',
-  defCategories: ['fun'],
-  availableOnBotName: ['bot1'],
-  runInChat: true,
-  isFullMode: true,
-  isNotification: false,
+  name:        "quiz",
+  description: "AI-generated quiz with multiple choice questions",
+  usage:       "!quiz [topic]",
+  category:    "Fun",
+};
+
+// ── Active quiz sessions ──────────────────────────────────────────────────────
+if (!global.quizSessions) global.quizSessions = {};
+
+// ── Ask AI via Pollinations ───────────────────────────────────────────────────
+async function askAI(prompt) {
+  const models = ["openai", "llama", "mistral"];
+  for (let i = 0; i < models.length; i++) {
+    try {
+      const res = await axios.post(
+        "https://text.pollinations.ai/",
+        {
+          messages: [{ role: "user", content: prompt }],
+          model:    models[i],
+          seed:     Math.floor(Math.random() * 9999),
+        },
+        { headers: { "Content-Type": "application/json" }, timeout: 30000 }
+      );
+      const text = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
+      if (text && text.length > 50) return text;
+    } catch(e) { console.log("[Quiz] AI " + models[i] + " failed:", e.message); }
+  }
+  throw new Error("All AI models failed");
+}
+
+// ── Generate quiz question ────────────────────────────────────────────────────
+async function generateQuestion(topic) {
+  const prompt =
+    "Generate a multiple choice quiz question about: " + topic + "\n\n" +
+    "You MUST respond in EXACTLY this format with no extra text:\n" +
+    "QUESTION: [the question here]\n" +
+    "A: [option A]\n" +
+    "B: [option B]\n" +
+    "C: [option C]\n" +
+    "D: [option D]\n" +
+    "ANSWER: [just the letter A, B, C, or D]\n" +
+    "EXPLANATION: [brief explanation why]\n\n" +
+    "Do not add anything else. Follow the exact format above.";
+
+  const raw = await askAI(prompt);
+
+  // Parse the response
+  const questionMatch     = raw.match(/QUESTION:\s*(.+?)(?:\n|$)/i);
+  const aMatch            = raw.match(/^A[:.]\s*(.+?)(?:\n|$)/im);
+  const bMatch            = raw.match(/^B[:.]\s*(.+?)(?:\n|$)/im);
+  const cMatch            = raw.match(/^C[:.]\s*(.+?)(?:\n|$)/im);
+  const dMatch            = raw.match(/^D[:.]\s*(.+?)(?:\n|$)/im);
+  const answerMatch       = raw.match(/ANSWER:\s*([ABCD])/i);
+  const explanationMatch  = raw.match(/EXPLANATION:\s*(.+?)(?:\n|$)/i);
+
+  if (!questionMatch || !aMatch || !bMatch || !cMatch || !dMatch || !answerMatch) {
+    console.log("[Quiz] Parse failed. Raw response:", raw.substring(0, 200));
+    throw new Error("Could not parse quiz format");
+  }
+
+  return {
+    question:    questionMatch[1].trim(),
+    options:     {
+      A: aMatch[1].trim(),
+      B: bMatch[1].trim(),
+      C: cMatch[1].trim(),
+      D: dMatch[1].trim(),
+    },
+    answer:      answerMatch[1].toUpperCase(),
+    explanation: explanationMatch ? explanationMatch[1].trim() : "Correct!",
+    topic:       topic,
+  };
+}
+
+// ── Format quiz message ───────────────────────────────────────────────────────
+function formatQuestion(q, num) {
+  return (
+    "🧠 QUIZ" + (num ? " #" + num : "") + " — " + q.topic.toUpperCase() + "\n" +
+    "━━━━━━━━━━━━━━\n" +
+    "❓ " + q.question + "\n\n" +
+    "A️⃣  " + q.options.A + "\n" +
+    "B️⃣  " + q.options.B + "\n" +
+    "C️⃣  " + q.options.C + "\n" +
+    "D️⃣  " + q.options.D + "\n\n" +
+    "Reply with A, B, C, or D!"
+  );
+}
+
+// ── Command ───────────────────────────────────────────────────────────────────
+module.exports.run = async function ({ api, args, event }) {
+  const uid   = event.senderId;
+  const input = args.join(" ").trim().toLowerCase();
+
+  // Check if answering an active quiz
+  const answer = input.toUpperCase();
+  if (["A","B","C","D"].includes(answer) && global.quizSessions[uid]) {
+    const session = global.quizSessions[uid];
+    const correct = session.answer;
+    const isRight = answer === correct;
+
+    delete global.quizSessions[uid];
+
+    let msg = isRight
+      ? "✅ CORRECT! Well done!\n\n"
+      : "❌ Wrong! The answer is " + correct + "\n\n";
+
+    msg += "💡 " + session.explanation + "\n\n";
+    msg += isRight ? "🎉 Keep it up! Try another: !quiz [topic]" : "💪 Try again: !quiz [topic]";
+
+    return api.send(msg);
+  }
+
+  // Generate new quiz
+  const topic = input || "general knowledge";
+
+  await api.send("🧠 Generating quiz on: " + topic + "...");
+
+  try {
+    const question = await generateQuestion(topic);
+
+    // Save session
+    global.quizSessions[uid] = {
+      answer:      question.answer,
+      explanation: question.explanation,
+      topic:       topic,
+      time:        Date.now(),
+    };
+
+    // Auto-expire session after 5 minutes
+    setTimeout(function() {
+      if (global.quizSessions[uid] && global.quizSessions[uid].time === global.quizSessions[uid].time) {
+        delete global.quizSessions[uid];
+      }
+    }, 5 * 60 * 1000);
+
+    await api.send(formatQuestion(question));
+
+  } catch(err) {
+    console.error("[Quiz] Error:", err.message);
+    await api.send(
+      "❌ Could not generate quiz.\n\n" +
+      "Try a more specific topic like:\n" +
+      "!quiz philippine history\n" +
+      "!quiz math\n" +
+      "!quiz animals"
+    );
+  }
 };
