@@ -1,9 +1,9 @@
-const axios  = require("axios");
-const fs     = require("fs");
-const path   = require("path");
-const { exec, execSync } = require("child_process");
+const axios   = require("axios");
+const fs      = require("fs");
+const path    = require("path");
 const { promisify } = require("util");
-const execAsync = promisify(exec);
+const { exec }      = require("child_process");
+const execAsync     = promisify(exec);
 
 module.exports.config = {
   name:        "autovideo",
@@ -21,120 +21,220 @@ if (!global.autoVideoState) {
     interval:    null,
     isPosting:   false,
     topicIndex:  0,
-    ytdlpReady:  false,
+    dlReady:     false,
+    dlMethod:    null, // "ytdlexec" | "ytdlp" | null
   };
 }
 const state = global.autoVideoState;
 
-// ── Temp directory for video downloads ───────────────────────────────────────
 const TMP_DIR = "/tmp/autovideo";
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 
-// ── Install yt-dlp if not present ─────────────────────────────────────────────
-async function ensureYtDlp() {
-  if (state.ytdlpReady) return true;
+// ── Setup downloader ──────────────────────────────────────────────────────────
+async function setupDownloader() {
+  if (state.dlReady) return true;
+
+  // Method 1: youtube-dl-exec npm package (installed via package.json)
   try {
-    await execAsync("yt-dlp --version");
-    state.ytdlpReady = true;
-    console.log("[AutoVideo] yt-dlp already installed");
+    const ytdl = require("youtube-dl-exec");
+    state._ytdl   = ytdl;
+    state.dlReady = true;
+    state.dlMethod = "ytdlexec";
+    console.log("[AutoVideo] Using youtube-dl-exec");
+    return true;
+  } catch (e) {
+    console.log("[AutoVideo] youtube-dl-exec not found:", e.message);
+  }
+
+  // Method 2: yt-dlp binary via curl download
+  try {
+    await execAsync("which yt-dlp");
+    state.dlReady  = true;
+    state.dlMethod = "ytdlp";
+    console.log("[AutoVideo] yt-dlp binary found");
     return true;
   } catch (e) {}
 
-  console.log("[AutoVideo] Installing yt-dlp...");
   try {
-    // Install via pip (Python is available on Render)
-    await execAsync("pip install yt-dlp --quiet --break-system-packages", { timeout: 60000 });
+    console.log("[AutoVideo] Downloading yt-dlp binary...");
+    await execAsync(
+      "curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /tmp/yt-dlp && chmod +x /tmp/yt-dlp",
+      { timeout: 60000 }
+    );
+    await execAsync("/tmp/yt-dlp --version");
+    state.dlReady  = true;
+    state.dlMethod = "ytdlp_tmp";
+    console.log("[AutoVideo] yt-dlp downloaded to /tmp");
+    return true;
+  } catch (e) {
+    console.log("[AutoVideo] yt-dlp binary download failed:", e.message);
+  }
+
+  // Method 3: pip install yt-dlp
+  try {
+    console.log("[AutoVideo] Trying pip install yt-dlp...");
+    await execAsync("pip3 install yt-dlp -q", { timeout: 90000 });
     await execAsync("yt-dlp --version");
-    state.ytdlpReady = true;
-    console.log("[AutoVideo] yt-dlp installed successfully");
+    state.dlReady  = true;
+    state.dlMethod = "ytdlp";
+    console.log("[AutoVideo] yt-dlp installed via pip");
     return true;
   } catch (e) {
     console.log("[AutoVideo] pip install failed:", e.message);
   }
 
-  try {
-    // Try downloading binary directly
-    await execAsync(
-      "curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp",
-      { timeout: 60000 }
-    );
-    await execAsync("yt-dlp --version");
-    state.ytdlpReady = true;
-    console.log("[AutoVideo] yt-dlp binary installed");
-    return true;
-  } catch (e) {
-    console.log("[AutoVideo] Binary install failed:", e.message);
-    return false;
-  }
+  return false;
 }
 
-// ── News topics ───────────────────────────────────────────────────────────────
+// ── Download video ────────────────────────────────────────────────────────────
+async function downloadVideo(videoUrl, videoId) {
+  const outPath = path.join(TMP_DIR, videoId + ".mp4");
+  if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+
+  // Clean old temp files
+  try {
+    fs.readdirSync(TMP_DIR).forEach(function(f) {
+      try { fs.unlinkSync(path.join(TMP_DIR, f)); } catch(e) {}
+    });
+  } catch(e) {}
+
+  console.log("[AutoVideo] Downloading:", videoUrl);
+
+  // Method 1: youtube-dl-exec
+  if (state.dlMethod === "ytdlexec" && state._ytdl) {
+    await state._ytdl(videoUrl, {
+      noPlaylist:          true,
+      format:              "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]/best",
+      mergeOutputFormat:   "mp4",
+      output:              outPath,
+      noWarnings:          true,
+      socketTimeout:       "30",
+    });
+  } else {
+    // Method 2/3: yt-dlp binary
+    const bin = state.dlMethod === "ytdlp_tmp" ? "/tmp/yt-dlp" : "yt-dlp";
+    const cmd = [
+      bin,
+      "--no-playlist",
+      "--max-filesize", "80M",
+      "-f", "\"bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]/best\"",
+      "--merge-output-format", "mp4",
+      "-o", outPath,
+      "--no-warnings",
+      "--socket-timeout", "30",
+      videoUrl
+    ].join(" ");
+    await execAsync(cmd, { timeout: 120000 });
+  }
+
+  if (!fs.existsSync(outPath)) throw new Error("Download failed — file not created");
+  const stats = fs.statSync(outPath);
+  if (stats.size < 10000) throw new Error("File too small — download failed");
+  console.log("[AutoVideo] Downloaded: " + (stats.size/1024/1024).toFixed(1) + "MB");
+  return outPath;
+}
+
+// ── Upload to Facebook (chunked) ──────────────────────────────────────────────
+async function uploadToFacebook(filePath, title, caption) {
+  const pageId    = process.env.PAGE_ID;
+  const feedToken = process.env.PAGE_FEED_TOKEN;
+  if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
+
+  const fileSize = fs.statSync(filePath).size;
+  console.log("[AutoVideo] Uploading " + (fileSize/1024/1024).toFixed(1) + "MB to Facebook...");
+
+  // Init upload session
+  const initRes = await axios.post(
+    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
+    null,
+    {
+      params: { upload_phase: "start", file_size: fileSize, access_token: feedToken },
+      timeout: 30000,
+    }
+  );
+
+  const sessionId = initRes.data.upload_session_id;
+  console.log("[AutoVideo] Upload session:", sessionId);
+
+  // Upload in 5MB chunks
+  const CHUNK  = 5 * 1024 * 1024;
+  const buffer = fs.readFileSync(filePath);
+  let offset   = 0;
+
+  while (offset < fileSize) {
+    const chunk   = buffer.slice(offset, Math.min(offset + CHUNK, fileSize));
+    const chunkRes = await axios.post(
+      "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
+      chunk,
+      {
+        params: {
+          upload_phase:      "transfer",
+          upload_session_id: sessionId,
+          start_offset:      offset,
+          access_token:      feedToken,
+        },
+        headers: { "Content-Type": "application/octet-stream" },
+        timeout: 120000,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      }
+    );
+    offset = parseInt(chunkRes.data.start_offset) || (offset + chunk.length);
+    console.log("[AutoVideo] Upload: " + Math.round((offset/fileSize)*100) + "%");
+  }
+
+  // Finish upload
+  await axios.post(
+    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
+    null,
+    {
+      params: {
+        upload_phase:      "finish",
+        upload_session_id: sessionId,
+        title:             title.substring(0, 100),
+        description:       caption.substring(0, 500),
+        access_token:      feedToken,
+      },
+      timeout: 60000,
+    }
+  );
+
+  console.log("[AutoVideo] Upload complete!");
+}
+
+// ── Topics ────────────────────────────────────────────────────────────────────
 const TOPICS = [
-  "Philippines news today",
-  "world news breaking",
-  "Philippines latest news",
-  "Asia news today",
-  "technology news today",
-  "sports news highlights",
-  "business news today",
-  "science discovery news",
-  "health news today",
-  "viral news today",
+  "Philippines news today", "world news breaking", "Philippines latest news",
+  "Asia news today", "technology news today", "sports news highlights",
+  "business news today", "science news today", "health news today", "viral news today",
 ];
 
-// ── Search YouTube for short news videos ─────────────────────────────────────
+// ── Search YouTube ────────────────────────────────────────────────────────────
 async function searchYouTube(query) {
   const apiKey = process.env.YOUTUBE_API_KEY;
   if (apiKey) {
     try {
       const res = await axios.get("https://www.googleapis.com/youtube/v3/search", {
         params: {
-          key:           apiKey,
-          q:             query,
-          part:          "snippet",
-          type:          "video",
-          order:         "date",
-          maxResults:    10,
-          videoDuration: "short", // under 4 minutes
-          publishedAfter: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+          key: apiKey, q: query, part: "snippet", type: "video",
+          order: "date", maxResults: 10, videoDuration: "short",
+          publishedAfter: new Date(Date.now() - 48*60*60*1000).toISOString(),
         },
         timeout: 15000,
       });
-      const items = (res.data && res.data.items) ? res.data.items : [];
-      return items.map(function(item) {
-        return {
-          id:      item.id.videoId,
-          title:   item.snippet.title,
-          channel: item.snippet.channelTitle,
-          url:     "https://www.youtube.com/watch?v=" + item.id.videoId,
-        };
+      return ((res.data && res.data.items) ? res.data.items : []).map(function(item) {
+        return { id: item.id.videoId, title: item.snippet.title, channel: item.snippet.channelTitle, url: "https://www.youtube.com/watch?v=" + item.id.videoId };
       });
-    } catch (e) {
-      console.log("[AutoVideo] YouTube API failed:", e.message);
-    }
+    } catch (e) { console.log("[AutoVideo] YouTube API failed:", e.message); }
   }
-
-  // Fallback: Invidious
-  const instances = [
-    "https://invidious.snopyta.org",
-    "https://vid.puffyan.us",
-    "https://invidious.kavin.rocks",
-  ];
+  // Invidious fallback
+  const instances = ["https://invidious.snopyta.org", "https://vid.puffyan.us", "https://invidious.kavin.rocks"];
   for (let i = 0; i < instances.length; i++) {
     try {
-      const res = await axios.get(instances[i] + "/api/v1/search", {
-        params: { q: query, type: "video", sort_by: "upload_date" },
-        timeout: 10000,
-      });
-      const items = Array.isArray(res.data) ? res.data.slice(0, 10) : [];
-      if (items.length > 0) {
-        return items.map(function(item) {
-          return {
-            id:      item.videoId,
-            title:   item.title,
-            channel: item.author,
-            url:     "https://www.youtube.com/watch?v=" + item.videoId,
-          };
+      const res = await axios.get(instances[i] + "/api/v1/search", { params: { q: query, type: "video", sort_by: "upload_date" }, timeout: 10000 });
+      if (Array.isArray(res.data) && res.data.length > 0) {
+        return res.data.slice(0, 10).map(function(item) {
+          return { id: item.videoId, title: item.title, channel: item.author, url: "https://www.youtube.com/watch?v=" + item.videoId };
         });
       }
     } catch (e) {}
@@ -142,137 +242,11 @@ async function searchYouTube(query) {
   return [];
 }
 
-// ── Download video with yt-dlp ────────────────────────────────────────────────
-async function downloadVideo(videoUrl, videoId) {
-  const outPath = path.join(TMP_DIR, videoId + ".mp4");
-
-  // Remove old file if exists
-  if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
-
-  // Clean up old temp files (keep tmp dir clean)
-  const files = fs.readdirSync(TMP_DIR);
-  files.forEach(function(f) {
-    try { fs.unlinkSync(path.join(TMP_DIR, f)); } catch(e) {}
-  });
-
-  console.log("[AutoVideo] Downloading:", videoUrl);
-
-  // Download with yt-dlp:
-  // - max filesize 50MB (Facebook limit is 10GB but we keep it small for speed)
-  // - format: best mp4 under 480p (faster download, good enough quality)
-  // - no playlist, just single video
-  const cmd = [
-    "yt-dlp",
-    "--no-playlist",
-    "--max-filesize", "50M",
-    "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]/best",
-    "--merge-output-format", "mp4",
-    "-o", outPath,
-    "--no-warnings",
-    "--socket-timeout", "30",
-    videoUrl
-  ].join(" ");
-
-  await execAsync(cmd, { timeout: 120000 }); // 2 min timeout
-
-  if (!fs.existsSync(outPath)) throw new Error("Download failed - file not found");
-
-  const stats   = fs.statSync(outPath);
-  const sizeMB  = (stats.size / 1024 / 1024).toFixed(1);
-  console.log("[AutoVideo] Downloaded: " + sizeMB + "MB");
-
-  if (stats.size < 10000) throw new Error("Downloaded file too small, likely failed");
-
-  return outPath;
-}
-
-// ── Upload video to Facebook using chunked upload API ─────────────────────────
-async function uploadVideoToFacebook(filePath, title, description) {
-  const pageId    = process.env.PAGE_ID;
-  const feedToken = process.env.PAGE_FEED_TOKEN;
-  if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
-
-  const fileSize = fs.statSync(filePath).size;
-  console.log("[AutoVideo] Uploading to Facebook: " + (fileSize/1024/1024).toFixed(1) + "MB");
-
-  // Step 1: Initialize upload session
-  const initRes = await axios.post(
-    "https://graph.facebook.com/v19.0/" + pageId + "/videos",
-    null,
-    {
-      params: {
-        upload_phase:  "start",
-        file_size:     fileSize,
-        access_token:  feedToken,
-      },
-      timeout: 30000,
-    }
-  );
-
-  const uploadSessionId = initRes.data.upload_session_id;
-  const videoId         = initRes.data.video_id;
-  console.log("[AutoVideo] Upload session started:", uploadSessionId);
-
-  // Step 2: Upload file in chunks (5MB chunks)
-  const CHUNK_SIZE = 5 * 1024 * 1024;
-  const fileBuffer = fs.readFileSync(filePath);
-  let offset       = 0;
-
-  while (offset < fileSize) {
-    const chunk     = fileBuffer.slice(offset, offset + CHUNK_SIZE);
-    const chunkForm = new FormData();
-
-    // Use axios with buffer upload
-    const chunkRes = await axios.post(
-      "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
-      chunk,
-      {
-        params: {
-          upload_phase:      "transfer",
-          upload_session_id: uploadSessionId,
-          start_offset:      offset,
-          access_token:      feedToken,
-        },
-        headers: {
-          "Content-Type":   "application/octet-stream",
-          "Content-Length": chunk.length,
-        },
-        timeout: 120000,
-        maxBodyLength: Infinity,
-      }
-    );
-
-    offset = parseInt(chunkRes.data.start_offset) || (offset + chunk.length);
-    console.log("[AutoVideo] Upload progress: " + Math.round((offset/fileSize)*100) + "%");
-  }
-
-  // Step 3: Finish upload
-  await axios.post(
-    "https://graph-video.facebook.com/v19.0/" + pageId + "/videos",
-    null,
-    {
-      params: {
-        upload_phase:      "finish",
-        upload_session_id: uploadSessionId,
-        title:             title.substring(0, 100),
-        description:       description.substring(0, 500),
-        access_token:      feedToken,
-      },
-      timeout: 60000,
-    }
-  );
-
-  console.log("[AutoVideo] Upload complete! Video ID:", videoId);
-  return videoId;
-}
-
 // ── Generate caption ──────────────────────────────────────────────────────────
 async function generateCaption(video) {
   try {
     const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
-      params: {
-        prompt: "Write a short engaging Facebook post caption for this news video (2-3 sentences, no hashtags, no asterisks, no markdown). Make people want to watch:\n\nTitle: " + video.title + "\nChannel: " + video.channel,
-      },
+      params: { prompt: "Write a short engaging Facebook caption for this news video (2-3 sentences, no hashtags, no asterisks):\n\nTitle: " + video.title + "\nChannel: " + video.channel },
       timeout: 25000,
     });
     const r = (res.data && res.data.data && res.data.data.text) ? res.data.data.text : null;
@@ -281,7 +255,7 @@ async function generateCaption(video) {
   return video.title;
 }
 
-// ── Cleanup temp files ────────────────────────────────────────────────────────
+// ── Cleanup ───────────────────────────────────────────────────────────────────
 function cleanup(filePath) {
   try { if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch(e) {}
 }
@@ -293,135 +267,100 @@ async function autoPost(notifyFn) {
   let filePath = null;
 
   try {
-    // Ensure yt-dlp is installed
-    const ready = await ensureYtDlp();
-    if (!ready) {
-      notifyFn("❌ yt-dlp could not be installed. Cannot download videos.");
-      return;
-    }
+    // Setup downloader
+    const ready = await setupDownloader();
+    if (!ready) { notifyFn("❌ No download method available. Add youtube-dl-exec to package.json!"); return; }
 
-    // Search for videos
+    // Search
     const topic = TOPICS[state.topicIndex % TOPICS.length];
     state.topicIndex++;
-    console.log("[AutoVideo] Topic:", topic);
-
     const videos = await searchYouTube(topic);
     if (!videos.length) { notifyFn("⚠️ No videos found for: " + topic); return; }
 
-    // Pick unposted video
+    // Pick fresh
     let video = null;
     for (let i = 0; i < videos.length; i++) {
       if (!state.postedIds.has(videos[i].id)) { video = videos[i]; break; }
     }
-    if (!video) { notifyFn("⚠️ All videos already posted. Trying next topic next cycle."); return; }
+    if (!video) { notifyFn("⚠️ All videos already posted. Next cycle will try different topic."); return; }
 
     state.postedIds.add(video.id);
-    notifyFn("📥 Downloading: " + video.title);
+    notifyFn("📥 Downloading: " + video.title + "\n⏳ Please wait 1-3 minutes...");
 
-    // Download video
     filePath = await downloadVideo(video.url, video.id);
-
-    // Generate caption
     const caption = await generateCaption(video);
 
-    // Upload to Facebook
     notifyFn("📤 Uploading to Facebook...");
-    await uploadVideoToFacebook(filePath, video.title, caption);
+    await uploadToFacebook(filePath, video.title, caption);
 
     state.totalPosted++;
     state.lastPosted = new Date().toISOString();
-    notifyFn("✅ Video posted: " + video.title);
+    notifyFn("✅ Video posted directly: " + video.title);
 
   } catch (err) {
+    // Remove from posted so it can retry
     notifyFn("❌ Failed: " + err.message);
     console.error("[AutoVideo] Error:", err.message);
-    // Remove from posted set if it failed so it can retry
   } finally {
     cleanup(filePath);
     state.isPosting = false;
   }
 }
 
-// ── Auto start ────────────────────────────────────────────────────────────────
+// ── Start ─────────────────────────────────────────────────────────────────────
 function startAutoVideo() {
   if (state.interval) return;
   if (!process.env.PAGE_ID || !process.env.PAGE_FEED_TOKEN) {
-    console.log("[AutoVideo] Not started: Missing PAGE_ID or PAGE_FEED_TOKEN.");
+    console.log("[AutoVideo] Not started: Missing env vars.");
     return;
   }
-  console.log("[AutoVideo] Starting (download + reupload mode)...");
-
-  // First video after 3 minutes (let bot fully start)
-  setTimeout(function() {
-    autoPost(function(msg) { console.log("[AutoVideo]", msg); });
-  }, 3 * 60 * 1000);
-
-  // Every 45 minutes (downloading takes time)
-  state.interval = setInterval(function() {
-    autoPost(function(msg) { console.log("[AutoVideo]", msg); });
-  }, 45 * 60 * 1000);
+  console.log("[AutoVideo] Starting...");
+  setTimeout(function() { autoPost(function(msg) { console.log("[AutoVideo]", msg); }); }, 3 * 60 * 1000);
+  state.interval = setInterval(function() { autoPost(function(msg) { console.log("[AutoVideo]", msg); }); }, 45 * 60 * 1000);
 }
 
 startAutoVideo();
 
-// ── Command ───────────────────────────────────────────────────────────────────
+// ── Command (admin only) ──────────────────────────────────────────────────────
 module.exports.run = async function ({ api, args, event }) {
   const uid     = event.senderId;
   const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
   const isAdmin = ADMINS.length === 0 || ADMINS.includes(uid);
-  const action  = (args[0] || "status").toLowerCase();
 
-  // ALL actions admin only including status
   if (!isAdmin) return api.send("⛔ This command is for admins only!");
 
-  if (action !== "status" && !isAdmin) return api.send("⛔ Admins only!");
+  const action = (args[0] || "status").toLowerCase();
 
   if (action === "status") {
     return api.send(
-      "📺 AutoVideo Status\n" +
-      "━━━━━━━━━━━━━━\n" +
-      "Status: "        + (state.interval ? "🟢 Running" : "🔴 Stopped") + "\n" +
-      "yt-dlp: "        + (state.ytdlpReady ? "✅ Ready" : "⏳ Not installed yet") + "\n" +
-      "YouTube API: "   + (process.env.YOUTUBE_API_KEY ? "✅ Connected" : "⚠️ Using fallback") + "\n" +
-      "Videos posted: " + state.totalPosted + "\n" +
-      "Last posted: "   + (state.lastPosted ? new Date(state.lastPosted).toLocaleString() : "Never") + "\n" +
-      "Next topic: "    + TOPICS[state.topicIndex % TOPICS.length] + "\n" +
-      "Mode: 📥 Download + Reupload"
+      "📺 AutoVideo Status\n━━━━━━━━━━━━━━\n" +
+      "Status: "      + (state.interval ? "🟢 Running" : "🔴 Stopped") + "\n" +
+      "Downloader: "  + (state.dlReady ? "✅ " + state.dlMethod : "⏳ Not ready") + "\n" +
+      "YouTube API: " + (process.env.YOUTUBE_API_KEY ? "✅ Connected" : "⚠️ Using fallback") + "\n" +
+      "Total posted: " + state.totalPosted + "\n" +
+      "Last posted: " + (state.lastPosted ? new Date(state.lastPosted).toLocaleString() : "Never") + "\n" +
+      "Next topic: "  + TOPICS[state.topicIndex % TOPICS.length]
     );
   }
-
   if (action === "test") {
-    api.send("🧪 Downloading and posting a video now...\n⏳ This may take 1-3 minutes...");
+    api.send("🧪 Starting download + upload...\n⏳ Takes 1-3 minutes...");
     await autoPost(function(msg) { api.send(msg); });
     return;
   }
-
   if (action === "on") {
-    if (state.interval) return api.send("✅ Already running!");
+    if (state.interval) return api.send("Already running!");
     startAutoVideo();
-    return api.send("✅ AutoVideo started! Posts every 45 minutes.");
+    return api.send("✅ AutoVideo started!");
   }
-
   if (action === "off") {
     if (!state.interval) return api.send("Already stopped!");
     clearInterval(state.interval);
     state.interval = null;
     return api.send("🔴 AutoVideo stopped.");
   }
-
   if (action === "reset") {
-    const c = state.postedIds.size;
     state.postedIds.clear();
-    return api.send("🔄 Cleared " + c + " video IDs.");
+    return api.send("🔄 History cleared!");
   }
-
-  api.send(
-    "📺 AutoVideo Commands\n" +
-    "━━━━━━━━━━━━━━\n" +
-    "!autovideo status — Check status\n" +
-    "!autovideo test   — Download & post now\n" +
-    "!autovideo on     — Start\n" +
-    "!autovideo off    — Stop\n" +
-    "!autovideo reset  — Clear history"
-  );
+  api.send("!autovideo status | test | on | off | reset");
 };
