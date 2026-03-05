@@ -371,6 +371,9 @@ module.exports.run = async function ({ api, args, event }) {
   const isAdmin = ADMINS.length === 0 || ADMINS.includes(uid);
   const action  = (args[0] || "status").toLowerCase();
 
+  // ALL actions admin only including status
+  if (!isAdmin) return api.send("⛔ This command is for admins only!");
+
   if (action !== "status" && !isAdmin) return api.send("⛔ Admins only!");
 
   if (action === "status") {
