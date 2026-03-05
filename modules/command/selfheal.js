@@ -4,48 +4,83 @@ const path  = require("path");
 
 module.exports.config = {
   name:        "selfheal",
-  description: "AI self-healing system — detects errors and auto-fixes commands via GitHub",
-  usage:       "!selfheal status | on | off | log | fix [command]",
+  description: "AI self-healing system with logic test cases — detects and fixes commands automatically",
+  usage:       "!selfheal status | on | off | log | fix [cmd] | addtest [cmd] | tests",
   category:    "Admin",
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const CMD_DIR    = path.join(__dirname);
-const LOG_FILE   = path.join(__dirname, ".selfheal_log.json");
-const MAX_LOG    = 50;
-const MAX_FIXES  = 3; // max auto-fix attempts per command
+const CMD_DIR   = path.join(__dirname);
+const LOG_FILE  = path.join(__dirname, ".selfheal_log.json");
+const TEST_FILE = path.join(__dirname, ".selfheal_tests.json");
+const MAX_LOG   = 50;
+const MAX_TRIES = 5; // max AI fix attempts per session
+
+// ── Built-in test cases for common commands ───────────────────────────────────
+const DEFAULT_TESTS = {
+  "quiz": {
+    desc:    "Must contain question and multiple choice answer",
+    checks:  ["QUESTION:", "A:", "B:", "C:", "D:", "ANSWER:"],
+    mustNot: ["Could not parse", "undefined", "null"],
+  },
+  "anime": {
+    desc:    "Must return anime info",
+    checks:  ["Title", "Rating"],
+    mustNot: ["error", "undefined"],
+  },
+  "autonews": {
+    desc:    "Must have config and run",
+    checks:  ["module.exports.config", "module.exports.run"],
+    mustNot: [],
+  },
+  "autoreact": {
+    desc:    "Must have config and run",
+    checks:  ["module.exports.config", "module.exports.run"],
+    mustNot: [],
+  },
+};
 
 // ── State ─────────────────────────────────────────────────────────────────────
 if (!global.selfHealState) {
   global.selfHealState = {
-    enabled:   true,
+    enabled:    true,
     totalFixed: 0,
-    log:       [],
+    totalFails: 0,
+    log:        [],
+    tests:      {},
   };
 }
 const state = global.selfHealState;
 
-// ── Load/Save log ─────────────────────────────────────────────────────────────
-function loadLog() {
+// ── Load/Save ─────────────────────────────────────────────────────────────────
+function loadData() {
   try {
     if (fs.existsSync(LOG_FILE)) {
-      const data = JSON.parse(fs.readFileSync(LOG_FILE, "utf8"));
-      state.log        = data.log        || [];
-      state.totalFixed = data.totalFixed || 0;
+      const d = JSON.parse(fs.readFileSync(LOG_FILE, "utf8"));
+      state.log        = d.log        || [];
+      state.totalFixed = d.totalFixed || 0;
+      state.totalFails = d.totalFails || 0;
     }
   } catch(e) {}
+  try {
+    if (fs.existsSync(TEST_FILE)) {
+      state.tests = JSON.parse(fs.readFileSync(TEST_FILE, "utf8"));
+    } else {
+      state.tests = Object.assign({}, DEFAULT_TESTS);
+      fs.writeFileSync(TEST_FILE, JSON.stringify(state.tests, null, 2));
+    }
+  } catch(e) { state.tests = Object.assign({}, DEFAULT_TESTS); }
 }
 
 function saveLog() {
-  try {
-    fs.writeFileSync(LOG_FILE, JSON.stringify({
-      log:        state.log.slice(-MAX_LOG),
-      totalFixed: state.totalFixed,
-    }, null, 2));
-  } catch(e) {}
+  try { fs.writeFileSync(LOG_FILE, JSON.stringify({ log: state.log.slice(-MAX_LOG), totalFixed: state.totalFixed, totalFails: state.totalFails }, null, 2)); } catch(e) {}
 }
 
-loadLog();
+function saveTests() {
+  try { fs.writeFileSync(TEST_FILE, JSON.stringify(state.tests, null, 2)); } catch(e) {}
+}
+
+loadData();
 
 // ── GitHub helpers ────────────────────────────────────────────────────────────
 async function githubGet(filePath) {
@@ -53,19 +88,11 @@ async function githubGet(filePath) {
   const repo   = process.env.GITHUB_REPO;
   const branch = process.env.GITHUB_BRANCH || "main";
   if (!token || !repo) throw new Error("GITHUB_TOKEN or GITHUB_REPO not set");
-
   const res = await axios.get(
     "https://api.github.com/repos/" + repo + "/contents/" + filePath,
-    {
-      headers: { Authorization: "Bearer " + token, "User-Agent": "AIKORA-SelfHeal" },
-      params:  { ref: branch },
-      timeout: 15000,
-    }
+    { headers: { Authorization: "Bearer " + token, "User-Agent": "AIKORA-SelfHeal" }, params: { ref: branch }, timeout: 15000 }
   );
-  return {
-    content: Buffer.from(res.data.content, "base64").toString("utf8"),
-    sha:     res.data.sha,
-  };
+  return { content: Buffer.from(res.data.content, "base64").toString("utf8"), sha: res.data.sha };
 }
 
 async function githubPush(filePath, content, message, sha) {
@@ -73,63 +100,83 @@ async function githubPush(filePath, content, message, sha) {
   const repo   = process.env.GITHUB_REPO;
   const branch = process.env.GITHUB_BRANCH || "main";
   if (!token || !repo) throw new Error("GITHUB_TOKEN or GITHUB_REPO not set");
-
-  const body = {
-    message: message,
-    content: Buffer.from(content).toString("base64"),
-    branch:  branch,
-  };
+  const body = { message: message, content: Buffer.from(content).toString("base64"), branch: branch };
   if (sha) body.sha = sha;
-
   await axios.put(
     "https://api.github.com/repos/" + repo + "/contents/" + filePath,
     body,
-    {
-      headers: {
-        Authorization:  "Bearer " + token,
-        "User-Agent":   "AIKORA-SelfHeal",
-        "Content-Type": "application/json",
-      },
-      timeout: 20000,
-    }
+    { headers: { Authorization: "Bearer " + token, "User-Agent": "AIKORA-SelfHeal", "Content-Type": "application/json" }, timeout: 20000 }
   );
 }
 
-// ── AI fix using Pollinations ─────────────────────────────────────────────────
+// ── AI helper ─────────────────────────────────────────────────────────────────
 async function askAI(prompt) {
-  const models = ["openai", "claude-hybridspace", "llama"];
+  const models = ["openai", "claude-hybridspace", "llama", "mistral"];
   for (let i = 0; i < models.length; i++) {
     try {
       const res = await axios.post(
         "https://text.pollinations.ai/",
-        {
-          messages: [{ role: "user", content: prompt }],
-          model:    models[i],
-          seed:     Math.floor(Math.random() * 9999),
-        },
+        { messages: [{ role: "user", content: prompt }], model: models[i], seed: Math.floor(Math.random() * 9999) },
         { headers: { "Content-Type": "application/json" }, timeout: 60000 }
       );
       const text = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
-      if (text && text.length > 100) return text;
-    } catch(e) { console.log("[SelfHeal] AI model " + models[i] + " failed:", e.message); }
+      if (text && text.length > 100) return { text: text, model: models[i] };
+    } catch(e) { console.log("[SelfHeal] AI " + models[i] + " failed:", e.message); }
   }
   throw new Error("All AI models failed");
 }
 
-// ── Clean AI response to get pure code ───────────────────────────────────────
+// ── Clean AI response ─────────────────────────────────────────────────────────
 function cleanCode(raw) {
   let code = raw;
   code = code.replace(/```(?:javascript|js|node|json)?\n?/gi, "");
   code = code.replace(/```/gi, "");
   code = code.replace(/^Here(?:'s| is) the.*?\n/im, "");
   code = code.replace(/^Sure[!,].*?\n/im, "");
-  code = code.replace(/^The (?:fixed|corrected).*?\n/im, "");
-  const codeStart = code.search(/^(?:const|let|var|require|module\.exports|\/\/|async|function)/m);
-  if (codeStart > 0) code = code.substring(codeStart);
+  code = code.replace(/^The (?:fixed|corrected|updated).*?\n/im, "");
+  const start = code.search(/^(?:const|let|var|require|module\.exports|\/\/|async|function)/m);
+  if (start > 0) code = code.substring(start);
   return code.trim();
 }
 
-// ── Hot reload a command ──────────────────────────────────────────────────────
+// ── Run test cases against code ───────────────────────────────────────────────
+function runTests(cmdName, code) {
+  const test = state.tests[cmdName];
+  if (!test) return { passed: true, reason: "No tests defined" };
+
+  const failures = [];
+
+  // Check required strings
+  if (test.checks) {
+    for (let i = 0; i < test.checks.length; i++) {
+      if (!code.includes(test.checks[i])) {
+        failures.push("Missing required: \"" + test.checks[i] + "\"");
+      }
+    }
+  }
+
+  // Check forbidden strings
+  if (test.mustNot) {
+    for (let i = 0; i < test.mustNot.length; i++) {
+      if (code.toLowerCase().includes(test.mustNot[i].toLowerCase())) {
+        failures.push("Contains forbidden: \"" + test.mustNot[i] + "\"");
+      }
+    }
+  }
+
+  // Always check basic structure
+  if (!code.includes("module.exports.config")) failures.push("Missing module.exports.config");
+  if (!code.includes("module.exports.run"))    failures.push("Missing module.exports.run");
+  if (code.length < 200)                        failures.push("Code too short (" + code.length + " chars)");
+
+  return {
+    passed:   failures.length === 0,
+    failures: failures,
+    reason:   failures.join(", "),
+  };
+}
+
+// ── Hot reload ────────────────────────────────────────────────────────────────
 function hotLoad(filePath) {
   try {
     delete require.cache[require.resolve(filePath)];
@@ -138,131 +185,143 @@ function hotLoad(filePath) {
       global.commands.set(cmd.config.name.toLowerCase(), cmd);
       return { success: true, name: cmd.config.name };
     }
-    return { success: false, reason: "Invalid structure after fix" };
-  } catch(err) {
-    return { success: false, reason: err.message };
-  }
+    return { success: false, reason: "Invalid structure" };
+  } catch(err) { return { success: false, reason: err.message }; }
 }
 
-// ── Main self-heal function ───────────────────────────────────────────────────
+// ── Main heal function with test loop ─────────────────────────────────────────
 async function healCommand(cmdName, errorMessage, notifyFn) {
   if (!state.enabled) return;
 
-  console.log("[SelfHeal] Healing: " + cmdName + " | Error: " + errorMessage);
-
-  // Check fix attempts
-  const existing = state.log.filter(function(l) {
-    return l.cmd === cmdName && l.type === "fix" &&
-      (Date.now() - new Date(l.time).getTime()) < 60 * 60 * 1000; // last 1 hour
-  });
-
-  if (existing.length >= MAX_FIXES) {
-    console.log("[SelfHeal] Max fixes reached for: " + cmdName);
-    if (notifyFn) notifyFn("⚠️ SelfHeal: Max fix attempts reached for !" + cmdName + ". Manual fix needed.");
-    return;
-  }
-
-  // Find command file
-  const filePath    = path.join(CMD_DIR, cmdName + ".js");
-  const githubPath  = "modules/command/" + cmdName + ".js";
+  const filePath   = path.join(CMD_DIR, cmdName + ".js");
+  const githubPath = "modules/command/" + cmdName + ".js";
 
   if (!fs.existsSync(filePath)) {
-    console.log("[SelfHeal] File not found:", filePath);
+    notifyFn && notifyFn("❌ SelfHeal: File not found — " + cmdName + ".js");
     return;
   }
 
-  try {
-    // Read broken code
-    const brokenCode = fs.readFileSync(filePath, "utf8");
+  const originalCode = fs.readFileSync(filePath, "utf8");
+  const test         = state.tests[cmdName];
+  const hasTests     = test && (test.checks || test.mustNot);
 
-    if (notifyFn) notifyFn("🔧 SelfHeal: Detected error in !" + cmdName + "\n🤖 AI is fixing it...");
+  notifyFn && notifyFn(
+    "🔧 SelfHeal: Fixing !" + cmdName + "\n" +
+    "🐛 Error: " + errorMessage.substring(0, 60) + "\n" +
+    "🧪 Tests: " + (hasTests ? test.desc || "Custom tests" : "Basic structure only") + "\n" +
+    "🤖 Starting AI fix loop..."
+  );
 
-    // Ask AI to fix
-    const prompt =
-      "You are an expert Node.js debugger for a Facebook Messenger bot.\n\n" +
-      "Fix this broken command file. The error is:\n" +
-      "ERROR: " + errorMessage + "\n\n" +
-      "RULES:\n" +
-      "- Only use axios for HTTP requests\n" +
-      "- Never use local imports (../utils, ../../config etc)\n" +
-      "- Must have module.exports.config and module.exports.run\n" +
-      "- Return ONLY the complete fixed JavaScript code, no markdown, no explanation\n\n" +
-      "BROKEN CODE:\n" + brokenCode + "\n\n" +
-      "Return the complete working fixed code:";
+  let lastCode  = originalCode;
+  let lastError = errorMessage;
+  let fixed     = false;
+  let attempt   = 0;
 
-    const aiResponse = await askAI(prompt);
-    const fixedCode  = cleanCode(aiResponse);
+  while (attempt < MAX_TRIES && !fixed) {
+    attempt++;
+    notifyFn && notifyFn("🔄 Fix attempt " + attempt + "/" + MAX_TRIES + "...");
 
-    // Validate fixed code
-    if (!fixedCode.includes("module.exports.config") || !fixedCode.includes("module.exports.run")) {
-      throw new Error("AI returned invalid code structure");
-    }
-    if (fixedCode.length < 150) {
-      throw new Error("AI returned code too short");
-    }
-
-    // Write fixed file locally
-    fs.writeFileSync(filePath, fixedCode, "utf8");
-
-    // Hot reload
-    const loaded = hotLoad(filePath);
-
-    // Push to GitHub for persistence
-    let githubSuccess = false;
     try {
-      const { sha } = await githubGet(githubPath);
-      await githubPush(
-        githubPath,
-        fixedCode,
-        "🔧 SelfHeal: Auto-fixed " + cmdName + " — " + errorMessage.substring(0, 50),
-        sha
+      // Build smart prompt based on test failures
+      const testResult = runTests(cmdName, lastCode);
+      const testInfo   = testResult.passed
+        ? "The code passes structural tests but has a runtime error."
+        : "The code FAILS these tests:\n" + testResult.failures.map(function(f){ return "  - " + f; }).join("\n");
+
+      const prompt =
+        "You are an expert Node.js developer fixing a Facebook Messenger bot command.\n\n" +
+        "COMMAND NAME: " + cmdName + "\n" +
+        "ERROR: " + lastError + "\n\n" +
+        testInfo + "\n\n" +
+        (hasTests ? (
+          "REQUIRED: The fixed code MUST contain these strings:\n" +
+          (test.checks || []).map(function(c){ return "  - " + c; }).join("\n") + "\n\n" +
+          (test.mustNot && test.mustNot.length ? (
+            "FORBIDDEN: The code must NOT contain:\n" +
+            test.mustNot.map(function(c){ return "  - " + c; }).join("\n") + "\n\n"
+          ) : "")
+        ) : "") +
+        "RULES:\n" +
+        "- Only use axios for HTTP\n" +
+        "- Never use local imports (../utils, ../../config)\n" +
+        "- Must have module.exports.config and module.exports.run\n" +
+        "- Return ONLY the complete fixed JavaScript code, no markdown\n\n" +
+        "CURRENT CODE:\n" + lastCode + "\n\n" +
+        "Return the complete fixed code:";
+
+      const { text, model } = await askAI(prompt);
+      const fixedCode = cleanCode(text);
+
+      console.log("[SelfHeal] Attempt " + attempt + " using " + model + " — code length: " + fixedCode.length);
+
+      // Run tests on fixed code
+      const result = runTests(cmdName, fixedCode);
+
+      if (!result.passed) {
+        notifyFn && notifyFn("⚠️ Attempt " + attempt + " failed tests: " + result.reason.substring(0, 80) + "\nRetrying...");
+        lastCode  = fixedCode; // use this as base for next attempt
+        lastError = "Tests failed: " + result.reason;
+        continue;
+      }
+
+      // Tests passed — write file
+      fs.writeFileSync(filePath, fixedCode, "utf8");
+      const loaded = hotLoad(filePath);
+
+      if (!loaded.success) {
+        notifyFn && notifyFn("⚠️ Attempt " + attempt + " hot reload failed: " + loaded.reason + "\nRetrying...");
+        lastCode  = fixedCode;
+        lastError = "Hot reload failed: " + loaded.reason;
+        fs.writeFileSync(filePath, originalCode, "utf8"); // restore original
+        continue;
+      }
+
+      // Push to GitHub
+      let githubSuccess = false;
+      try {
+        const { sha } = await githubGet(githubPath);
+        await githubPush(githubPath, fixedCode, "🔧 SelfHeal: Fixed " + cmdName + " (attempt " + attempt + ")", sha);
+        githubSuccess = true;
+      } catch(ghErr) { console.log("[SelfHeal] GitHub push failed:", ghErr.message); }
+
+      // Log success
+      state.totalFixed++;
+      state.log.push({ type: "fix", cmd: cmdName, error: errorMessage.substring(0, 100), attempts: attempt, github: githubSuccess, time: new Date().toISOString() });
+      saveLog();
+
+      notifyFn && notifyFn(
+        "✅ SelfHeal: Fixed !" + cmdName + "!\n" +
+        "🔄 Attempts needed: " + attempt + "\n" +
+        "🧪 All tests passed: ✅\n" +
+        "⚡ Hot reloaded: ✅\n" +
+        "☁️ GitHub synced: " + (githubSuccess ? "✅ Permanent" : "⚠️ Local only")
       );
-      githubSuccess = true;
-    } catch(ghErr) {
-      console.log("[SelfHeal] GitHub push failed:", ghErr.message);
+      fixed = true;
+
+    } catch(err) {
+      console.log("[SelfHeal] Attempt " + attempt + " error:", err.message);
+      lastError = err.message;
     }
+  }
 
-    // Log the fix
-    state.totalFixed++;
-    state.log.push({
-      type:    "fix",
-      cmd:     cmdName,
-      error:   errorMessage.substring(0, 100),
-      time:    new Date().toISOString(),
-      github:  githubSuccess,
-      loaded:  loaded.success,
-    });
+  if (!fixed) {
+    state.totalFails++;
+    state.log.push({ type: "fail", cmd: cmdName, error: errorMessage.substring(0, 100), attempts: attempt, time: new Date().toISOString() });
     saveLog();
-
-    const msg =
-      "✅ SelfHeal: Fixed !" + cmdName + "!\n" +
-      "🐛 Error was: " + errorMessage.substring(0, 60) + "\n" +
-      "🔄 Hot reloaded: " + (loaded.success ? "✅" : "❌") + "\n" +
-      "☁️ GitHub synced: " + (githubSuccess ? "✅ Permanent fix" : "⚠️ Local only");
-
-    console.log("[SelfHeal]", msg);
-    if (notifyFn) notifyFn(msg);
-
-  } catch(err) {
-    console.log("[SelfHeal] Fix failed:", err.message);
-
-    state.log.push({
-      type:  "fail",
-      cmd:   cmdName,
-      error: err.message.substring(0, 100),
-      time:  new Date().toISOString(),
-    });
-    saveLog();
-
-    if (notifyFn) notifyFn("❌ SelfHeal: Could not fix !" + cmdName + "\nReason: " + err.message);
+    // Restore original
+    fs.writeFileSync(filePath, originalCode, "utf8");
+    notifyFn && notifyFn(
+      "❌ SelfHeal: Could not fix !" + cmdName + " after " + attempt + " attempts.\n" +
+      "Original code restored.\n" +
+      "💡 Try: !selfheal addtest " + cmdName + " to add better test cases."
+    );
   }
 }
 
-// ── Attach error interceptor to all commands ──────────────────────────────────
+// ── Attach error interceptors ─────────────────────────────────────────────────
 function attachInterceptors(notifyFn) {
   if (!global.commands) return 0;
   let count = 0;
-
   global.commands.forEach(function(cmd, name) {
     if (!cmd._selfHealWrapped && typeof cmd.run === "function") {
       const originalRun = cmd.run;
@@ -270,24 +329,11 @@ function attachInterceptors(notifyFn) {
         try {
           return await originalRun(ctx);
         } catch(err) {
-          console.error("[SelfHeal] Error in !" + name + ":", err.message);
-
-          // Log the error
-          state.log.push({
-            type:  "error",
-            cmd:   name,
-            error: err.message.substring(0, 100),
-            time:  new Date().toISOString(),
-          });
+          console.error("[SelfHeal] Caught error in !" + name + ":", err.message);
+          state.log.push({ type: "error", cmd: name, error: err.message.substring(0, 100), time: new Date().toISOString() });
           saveLog();
-
-          // Notify user
-          try { ctx.api.send("⚠️ !" + name + " encountered an error. SelfHeal is fixing it..."); } catch(e) {}
-
-          // Trigger heal
+          try { ctx.api.send("⚠️ !" + name + " has an error. SelfHeal is fixing it automatically..."); } catch(e) {}
           healCommand(name, err.message, notifyFn);
-
-          // Re-throw so bot knows it failed
           throw err;
         }
       };
@@ -298,49 +344,72 @@ function attachInterceptors(notifyFn) {
   return count;
 }
 
-// ── Auto-start: attach interceptors after all commands load ───────────────────
+// ── Auto start ────────────────────────────────────────────────────────────────
 setTimeout(function() {
   const count = attachInterceptors(function(msg) {
     console.log("[SelfHeal]", msg);
-    // Notify admin if ADMIN_IDS set
     const adminId = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",")[0].trim();
-    if (adminId && global.bot && global.bot.sendMessage) {
-      global.bot.sendMessage({ text: msg }, adminId);
-    }
+    if (adminId && global.sendMessage) global.sendMessage({ text: msg }, adminId);
   });
-  console.log("[SelfHeal] ✅ Monitoring " + count + " commands for errors.");
-}, 5000); // wait 5s for all commands to load
+  console.log("[SelfHeal] ✅ Monitoring " + count + " commands with test cases.");
+}, 5000);
 
 // ── Command ───────────────────────────────────────────────────────────────────
 module.exports.run = async function ({ api, args, event }) {
   const uid     = event.senderId;
-  const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
+  const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id){ return id.trim(); }).filter(Boolean);
   const isAdmin = ADMINS.length === 0 || ADMINS.includes(uid);
-
   if (!isAdmin) return api.send("⛔ Admins only!");
 
   const action = (args[0] || "status").toLowerCase();
 
   if (action === "status") {
-    const errors = state.log.filter(function(l) { return l.type === "error"; }).length;
-    const fixes  = state.log.filter(function(l) { return l.type === "fix"; }).length;
-    const fails  = state.log.filter(function(l) { return l.type === "fail"; }).length;
-    const cmdCount = global.commands ? global.commands.size : 0;
+    const errors = state.log.filter(function(l){ return l.type === "error"; }).length;
+    const fixes  = state.log.filter(function(l){ return l.type === "fix"; }).length;
+    const fails  = state.log.filter(function(l){ return l.type === "fail"; }).length;
     return api.send(
-      "🔧 SelfHeal Status\n━━━━━━━━━━━━━━\n" +
-      "Status: "         + (state.enabled ? "🟢 Active" : "🔴 Disabled") + "\n" +
-      "Monitoring: "     + cmdCount + " commands\n" +
-      "Total errors: "   + errors + "\n" +
-      "Total fixed: "    + fixes + "\n" +
-      "Failed fixes: "   + fails + "\n" +
-      "GitHub: "         + (process.env.GITHUB_TOKEN ? "✅ Connected" : "❌ Not set") + "\n" +
-      "AI: Pollinations (3 models)"
+      "🔧 SelfHeal v2 Status\n━━━━━━━━━━━━━━\n" +
+      "Status: "        + (state.enabled ? "🟢 Active" : "🔴 Disabled") + "\n" +
+      "Monitoring: "    + (global.commands ? global.commands.size : 0) + " commands\n" +
+      "Test cases: "    + Object.keys(state.tests).length + " commands\n" +
+      "Max attempts: "  + MAX_TRIES + " per fix\n" +
+      "Errors caught: " + errors + "\n" +
+      "Fixed: "         + fixes + " ✅\n" +
+      "Failed: "        + fails + " ❌\n" +
+      "GitHub: "        + (process.env.GITHUB_TOKEN ? "✅" : "❌")
     );
+  }
+
+  if (action === "tests") {
+    const list = Object.keys(state.tests).map(function(k) {
+      const t = state.tests[k];
+      return "!" + k + " — " + (t.desc || "Custom") + "\n   ✅ Must have: " + (t.checks || []).join(", ") + (t.mustNot && t.mustNot.length ? "\n   ❌ Must not: " + t.mustNot.join(", ") : "");
+    });
+    return api.send("🧪 Test Cases:\n━━━━━━━━━━━━━━\n" + (list.length ? list.join("\n\n") : "No tests defined yet."));
+  }
+
+  if (action === "addtest") {
+    const cmdName = args[1] ? args[1].replace("!", "").toLowerCase() : null;
+    const rest    = args.slice(2).join(" ");
+    if (!cmdName) return api.send("Usage: !selfheal addtest [cmdname] [must contain words separated by comma]");
+
+    const checks = rest ? rest.split(",").map(function(s){ return s.trim(); }).filter(Boolean) : [];
+    state.tests[cmdName] = { desc: "Custom test for " + cmdName, checks: checks, mustNot: [] };
+    saveTests();
+    return api.send("✅ Test added for !" + cmdName + "\nMust contain: " + (checks.length ? checks.join(", ") : "basic structure only"));
+  }
+
+  if (action === "removetest") {
+    const cmdName = args[1] ? args[1].replace("!", "").toLowerCase() : null;
+    if (!cmdName) return api.send("Usage: !selfheal removetest [cmdname]");
+    delete state.tests[cmdName];
+    saveTests();
+    return api.send("🗑️ Test removed for !" + cmdName);
   }
 
   if (action === "on") {
     state.enabled = true;
-    const count = attachInterceptors(function(msg) { api.send(msg); });
+    const count = attachInterceptors(function(msg){ api.send(msg); });
     return api.send("✅ SelfHeal enabled! Monitoring " + count + " commands.");
   }
 
@@ -350,21 +419,22 @@ module.exports.run = async function ({ api, args, event }) {
   }
 
   if (action === "log") {
-    if (!state.log.length) return api.send("📋 No events logged yet.");
+    if (!state.log.length) return api.send("📋 No events yet.");
     const recent = state.log.slice(-10).reverse();
     const lines  = recent.map(function(l) {
       const icon = l.type === "fix" ? "✅" : l.type === "fail" ? "❌" : "⚠️";
       const time = new Date(l.time).toLocaleTimeString();
-      return icon + " [" + time + "] !" + l.cmd + " — " + l.error.substring(0, 40);
+      const att  = l.attempts ? " (" + l.attempts + " attempts)" : "";
+      return icon + " [" + time + "] !" + l.cmd + att + " — " + (l.error || "").substring(0, 40);
     });
-    return api.send("📋 SelfHeal Log (last 10):\n━━━━━━━━━━━━━━\n" + lines.join("\n"));
+    return api.send("📋 SelfHeal Log:\n━━━━━━━━━━━━━━\n" + lines.join("\n"));
   }
 
   if (action === "fix") {
-    const cmdName = args[1] ? args[1].toLowerCase().replace("!", "") : null;
-    if (!cmdName) return api.send("Usage: !selfheal fix [command name]");
-    api.send("🔧 Manually triggering fix for !" + cmdName + "...");
-    await healCommand(cmdName, "Manual fix requested", function(msg) { api.send(msg); });
+    const cmdName = args[1] ? args[1].replace("!", "").toLowerCase() : null;
+    if (!cmdName) return api.send("Usage: !selfheal fix [command]");
+    api.send("🔧 Fixing !" + cmdName + " with test loop...\n⏳ May take 1-3 minutes...");
+    await healCommand(cmdName, "Manual fix requested", function(msg){ api.send(msg); });
     return;
   }
 
@@ -375,12 +445,14 @@ module.exports.run = async function ({ api, args, event }) {
   }
 
   api.send(
-    "🔧 SelfHeal Commands\n━━━━━━━━━━━━━━\n" +
-    "!selfheal status     — Check status\n" +
-    "!selfheal on         — Enable\n" +
-    "!selfheal off        — Disable\n" +
-    "!selfheal log        — View error log\n" +
-    "!selfheal fix [cmd]  — Manually fix a command\n" +
-    "!selfheal clear      — Clear log"
+    "🔧 SelfHeal v2 Commands\n━━━━━━━━━━━━━━\n" +
+    "!selfheal status              — Status\n" +
+    "!selfheal tests               — View test cases\n" +
+    "!selfheal addtest [cmd] [words] — Add test\n" +
+    "!selfheal removetest [cmd]    — Remove test\n" +
+    "!selfheal fix [cmd]           — Manual fix\n" +
+    "!selfheal log                 — Error log\n" +
+    "!selfheal on/off              — Enable/Disable\n" +
+    "!selfheal clear               — Clear log"
   );
 };
