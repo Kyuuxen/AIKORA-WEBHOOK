@@ -106,13 +106,24 @@ async function generateVideo(article, imageUrl, musicPath, logoPath) {
   const t2Y   = 295;
 
   const drawText = [
-    "drawbox=x=0:y=" + barY  + ":w=640:h=95:color=black@0.85:t=fill",
-    "drawbox=x=0:y=" + lineY + ":w=640:h=3:color=red:t=fill",
-    "drawtext=text='" + PAGE_NAME + "':fontcolor=red:fontsize=13:x=10:y=" + t1Y,
-    "drawtext=text='" + dateStr   + "':fontcolor=white@0.6:fontsize=11:x=w-tw-10:y=" + t1Y,
-    "drawtext=text='" + headline  + "':fontcolor=white:fontsize=15:x=10:y=" + t2Y,
-    "drawtext=text='" + source    + "':fontcolor=yellow:fontsize=12:x=w-tw-10:y=" + t2Y,
-  ].join(",");
+  // background bar
+  "drawbox=x=0:y=" + barY + ":w=640:h=95:color=black@0.85:t=fill",
+
+  // red line
+  "drawbox=x=0:y=" + lineY + ":w=640:h=4:color=red:t=fill",
+
+  // page name (bigger)
+  "drawtext=text='" + PAGE_NAME + "':fontcolor=red:fontsize=20:x=10:y=" + t1Y,
+
+  // date
+  "drawtext=text='" + dateStr + "':fontcolor=white@0.7:fontsize=16:x=w-tw-10:y=" + t1Y,
+
+  // headline (biggest text)
+  "drawtext=text='" + headline + "':fontcolor=white:fontsize=26:x=10:y=" + t2Y,
+
+  // news source
+  "drawtext=text='" + source + "':fontcolor=yellow:fontsize=18:x=w-tw-10:y=" + t2Y
+].join(",");
 
   // Build inputs and filter
   let inputs     = '-loop 1 -t 15 -i "' + bgImg + '"'; // 15 seconds only!
