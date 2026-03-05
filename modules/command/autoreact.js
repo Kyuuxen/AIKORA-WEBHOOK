@@ -1,4 +1,3 @@
-
 const axios = require("axios");
 
 module.exports.config = {
@@ -102,8 +101,8 @@ async function fetchNews() {
   } catch(e) { return []; }
 }
 
-// ── Post to Page ─────────────────────────────────────────────────────────────
-async function postToPage(caption, imageUrl, articleUrl) {
+// ── Post to Facebook Page ─────────────────────────────────────────────────────
+async function postToFacebook(caption, imageUrl, articleUrl) {
   const pageId    = process.env.PAGE_ID;
   const feedToken = process.env.PAGE_FEED_TOKEN;
   if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
@@ -113,47 +112,11 @@ async function postToPage(caption, imageUrl, articleUrl) {
       await axios.post("https://graph.facebook.com/v19.0/" + pageId + "/photos",
         { url: imageUrl, caption: fullCaption, access_token: feedToken }, { timeout: 20000 });
       return "photo";
-    } catch(e) { console.log("[AutoReact] Page photo failed:", e.message); }
+    } catch(e) { console.log("[AutoReact] Photo failed, trying link:", e.message); }
   }
   await axios.post("https://graph.facebook.com/v19.0/" + pageId + "/feed",
     { message: fullCaption, link: articleUrl || undefined, access_token: feedToken }, { timeout: 15000 });
   return "link";
-}
-
-// ── Post to Group ─────────────────────────────────────────────────────────────
-async function postToGroup(caption, imageUrl, articleUrl) {
-  const groupId    = process.env.GROUP_ID    || "1220086550194170";
-  const groupToken = process.env.GROUP_TOKEN || process.env.PAGE_FEED_TOKEN;
-  if (!groupId || !groupToken) { console.log("[AutoReact] Group env not set, skipping."); return null; }
-  const fullCaption = caption + "\n\n🔗 " + (articleUrl || "");
-  if (imageUrl) {
-    try {
-      await axios.post("https://graph.facebook.com/v19.0/" + groupId + "/photos",
-        { url: imageUrl, caption: fullCaption, access_token: groupToken }, { timeout: 20000 });
-      return "group-photo";
-    } catch(e) { console.log("[AutoReact] Group photo failed:", e.message); }
-  }
-  await axios.post("https://graph.facebook.com/v19.0/" + groupId + "/feed",
-    { message: fullCaption, link: articleUrl || undefined, access_token: groupToken }, { timeout: 15000 });
-  return "group-link";
-}
-
-// ── Post to both ──────────────────────────────────────────────────────────────
-async function postToFacebook(caption, imageUrl, articleUrl) {
-  const results = [];
-  try {
-    const m = await postToPage(caption, imageUrl, articleUrl);
-    results.push("Page:" + m);
-  } catch(e) { results.push("Page:failed"); console.log("[AutoReact] Page failed:", e.message); }
-
-  await new Promise(function(r) { setTimeout(r, 2000); });
-
-  try {
-    const m = await postToGroup(caption, imageUrl, articleUrl);
-    if (m) results.push("Group:" + m);
-  } catch(e) { results.push("Group:failed"); console.log("[AutoReact] Group failed:", e.message); }
-
-  return results.join(" | ");
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
