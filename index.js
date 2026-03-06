@@ -70,8 +70,17 @@ async function askAI(uid, message) {
     }
   } catch(e) {}
 
-  // Build conversation history for context
-  const history = buildContext(uid, message);
+  // Build conversation history as proper messages array for Anthropic API
+  const rawMemory = userMemory.get(uid) || [];
+  const messages  = [];
+
+  // Add conversation history (last 6 messages)
+  rawMemory.slice(-6).forEach(function(x) {
+    messages.push({ role: x.role === "user" ? "user" : "assistant", content: x.text });
+  });
+
+  // Add current message
+  messages.push({ role: "user", content: message });
 
   // Use official Anthropic API if key is set
   if (apiKey) {
@@ -82,7 +91,7 @@ async function askAI(uid, message) {
           model:      "claude-haiku-4-5-20251001",
           max_tokens: 1024,
           system:     sys,
-          messages:   [{ role: "user", content: history }],
+          messages:   messages,
         },
         {
           headers: {
@@ -101,7 +110,7 @@ async function askAI(uid, message) {
         return text.trim();
       }
     } catch(e) {
-      logger.log("Anthropic API failed: " + e.message, "WARN");
+      logger.log("Anthropic API failed: " + (e.response ? JSON.stringify(e.response.data) : e.message), "WARN");
     }
   } else {
     logger.log("ANTHROPIC_API_KEY not set — falling back to Pollinations", "WARN");
