@@ -53,12 +53,12 @@ function buildContext(uid, msg) {
 }
 
 // AI Models
-// ── Claude AI via official Anthropic API ─────────────────────────────────────
+// ── Gemini AI via Google API ──────────────────────────────────────────────────
 async function askAI(uid, message) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY;
 
   // Build system prompt
-  let sys = "You are " + BOTNAME + ", a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use Taglish (mix of Tagalog and English) when appropriate. Use emojis sometimes. Never say you are Claude or any AI — you are always " + BOTNAME + ".";
+  let sys = "You are " + BOTNAME + ", a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use Taglish (mix of Tagalog and English) when appropriate. Use emojis sometimes. Never say you are Gemini or any AI — you are always " + BOTNAME + ".";
 
   // Add bot commands context
   try {
@@ -70,63 +70,59 @@ async function askAI(uid, message) {
     }
   } catch(e) {}
 
-  // Build conversation history as proper messages array for Anthropic API
+  // Build conversation history
   const rawMemory = userMemory.get(uid) || [];
-  const messages  = [];
 
-  // Add conversation history (last 6 messages)
-  // Anthropic requires alternating user/assistant roles
-  const history = rawMemory.slice(-6);
-  for (let i = 0; i < history.length; i++) {
-    const role = history[i].role === "user" ? "user" : "assistant";
-    // Skip if same role as previous (Anthropic doesn't allow consecutive same roles)
-    if (messages.length > 0 && messages[messages.length - 1].role === role) continue;
-    messages.push({ role: role, content: String(history[i].text || "") });
-  }
-
-  // Make sure last message before current is not "user" (would cause consecutive user messages)
-  if (messages.length > 0 && messages[messages.length - 1].role === "user") {
-    messages.pop();
-  }
-
-  // Add current message
-  messages.push({ role: "user", content: String(message || "") });
-
-  // Use official Anthropic API if key is set
-  if (apiKey) {
+  // Use Gemini API if key is set
+  if (geminiKey) {
     try {
+      // Build Gemini contents array (alternating user/model)
+      const contents = [];
+
+      // Add history
+      const history = rawMemory.slice(-6);
+      for (let i = 0; i < history.length; i++) {
+        const role = history[i].role === "user" ? "user" : "model";
+        if (contents.length > 0 && contents[contents.length - 1].role === role) continue;
+        contents.push({ role: role, parts: [{ text: String(history[i].text || "") }] });
+      }
+      // Ensure last history item is not user before adding current message
+      if (contents.length > 0 && contents[contents.length - 1].role === "user") contents.pop();
+      // Add current message
+      contents.push({ role: "user", parts: [{ text: String(message || "") }] });
+
       const res = await axios.post(
-        "https://api.anthropic.com/v1/messages",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + geminiKey,
         {
-          model:      "claude-haiku-4-5-20251001",
-          max_tokens: 1024,
-          system:     sys,
-          messages:   messages,
+          system_instruction: { parts: [{ text: sys }] },
+          contents: contents,
+          generationConfig: { maxOutputTokens: 1024, temperature: 0.7 },
         },
-        {
-          headers: {
-            "x-api-key":         apiKey,
-            "anthropic-version": "2023-06-01",
-            "content-type":      "application/json",
-          },
-          timeout: 30000,
-        }
+        { headers: { "Content-Type": "application/json" }, timeout: 30000 }
       );
-      const text = res.data && res.data.content && res.data.content[0] && res.data.content[0].text
-        ? res.data.content[0].text
-        : null;
+
+      const text = res.data &&
+        res.data.candidates &&
+        res.data.candidates[0] &&
+        res.data.candidates[0].content &&
+        res.data.candidates[0].content.parts &&
+        res.data.candidates[0].content.parts[0] &&
+        res.data.candidates[0].content.parts[0].text
+          ? res.data.candidates[0].content.parts[0].text
+          : null;
+
       if (text && text.trim().length > 2) {
-        logger.log("AI: Claude (Anthropic API)", "AI");
+        logger.log("AI: Gemini", "AI");
         return text.trim();
       }
     } catch(e) {
-      logger.log("Anthropic API failed: " + (e.response ? JSON.stringify(e.response.data) : e.message), "WARN");
+      logger.log("Gemini failed: " + (e.response ? JSON.stringify(e.response.data) : e.message), "WARN");
     }
   } else {
-    logger.log("ANTHROPIC_API_KEY not set — falling back to Pollinations", "WARN");
+    logger.log("GEMINI_API_KEY not set", "WARN");
   }
 
-  // Fallback to Pollinations if no API key or API failed
+  // Fallback to Pollinations
   try {
     const res = await axios.post(
       "https://text.pollinations.ai/",
@@ -135,14 +131,14 @@ async function askAI(uid, message) {
           { role: "system", content: sys },
           { role: "user",   content: message },
         ],
-        model: "claude-hybridspace",
+        model: "openai",
         seed:  Math.floor(Math.random() * 9999),
       },
       { headers: { "Content-Type": "application/json" }, timeout: 30000 }
     );
     const text = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
     if (text && text.trim().length > 2) {
-      logger.log("AI: Claude (Pollinations fallback)", "AI");
+      logger.log("AI: Pollinations fallback", "AI");
       return text.trim();
     }
   } catch(e) { logger.log("Pollinations fallback failed: " + e.message, "WARN"); }
@@ -377,7 +373,7 @@ app.get("/", function(req, res) {
     "<h1>" + BOTNAME + "</h1>" +
     "<p style='color:#00ff88'>Online</p>" +
     "<p>Commands: " + commands.size + "</p>" +
-    "<p>AI: Claude (Anthropic)</p>" +
+    "<p>AI: Gemini 2.0 Flash</p>" +
     "<p>Prefix: " + PREFIX + "</p>" +
     "</body></html>"
   );
@@ -388,6 +384,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async function() {
   logger.log(BOTNAME + " running on port " + PORT, "SYSTEM");
   logger.log("Commands: " + commands.size, "SYSTEM");
-  logger.log("AI: Claude (Pollinations)", "SYSTEM");
+  logger.log("AI: Gemini 2.0 Flash", "SYSTEM");
   await setPageOnline();
 });
