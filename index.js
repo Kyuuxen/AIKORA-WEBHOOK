@@ -297,6 +297,13 @@ async function handleMessage(senderId, text) {
     if (relayed) return;
   }
 
+  // Check livechat relay
+  const lcCmd = commands.get("admin");
+  if (lcCmd && typeof lcCmd.relay === "function") {
+    const relayed = await lcCmd.relay(senderId, text);
+    if (relayed) return;
+  }
+
   await handleAI(senderId, text);
 }
 
