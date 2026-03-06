@@ -61,13 +61,64 @@ async function getYouTube(url) {
   return { stream: ytdl.downloadFromInfo(info, { format: format }), title: title };
 }
 
-// ── Facebook via facebook-dl (npm package) ────────────────────────────────────
+// ── Facebook via savevideo.me (scraping) ─────────────────────────────────────
 async function getFacebook(url) {
-  const fbdl = require("facebook-dl");
-  const info  = await fbdl(url);
-  const dlUrl = (info && info.hd) || (info && info.sd) || (info && info.url) || null;
-  if (!dlUrl) throw new Error("Could not get Facebook download link");
-  return { url: dlUrl, title: (info && info.title) || "Facebook Video" };
+  // Try multiple services
+  const services = [
+    async function() {
+      // fdown.net
+      const r1 = await axios.get("https://fdown.net/", { timeout: 10000 });
+      const token = (r1.data.match(/name="_token"\s+value="([^"]+)"/) || [])[1];
+      if (!token) throw new Error("No token");
+      const r2 = await axios.post("https://fdown.net/download.php",
+        "_token=" + encodeURIComponent(token) + "&URLz=" + encodeURIComponent(url),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded", "Referer": "https://fdown.net/", "User-Agent": "Mozilla/5.0" }, timeout: 15000 }
+      );
+      const hdMatch = (r2.data.match(/href="(https:\/\/[^"]+)"[^>]*>\s*Download\s*HD/i) || []);
+      const sdMatch = (r2.data.match(/href="(https:\/\/[^"]+)"[^>]*>\s*Download\s*(SD|Normal)/i) || []);
+      const dlUrl = hdMatch[1] || sdMatch[1];
+      if (!dlUrl) throw new Error("fdown: no link found");
+      return { url: dlUrl, title: "Facebook Video" };
+    },
+    async function() {
+      // saveig.app which handles facebook too
+      const res = await axios.post(
+        "https://snapsave.app/action.php",
+        "url=" + encodeURIComponent(url),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0", "Referer": "https://snapsave.app/" }, timeout: 15000 }
+      );
+      const html = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
+      const match = html.match(/href="(https:\/\/[^"]+\.mp4[^"]*)"/i);
+      if (!match) throw new Error("snapsave: no link found");
+      return { url: match[1], title: "Facebook Video" };
+    },
+    async function() {
+      // getfvid.com
+      const res = await axios.post(
+        "https://www.getfvid.com/downloader",
+        "url=" + encodeURIComponent(url),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0", "Referer": "https://www.getfvid.com/" }, timeout: 15000 }
+      );
+      const html = res.data;
+      const match = html.match(/href="(https:\/\/video[^"]+\.mp4[^"]*)"/i)
+                 || html.match(/href="(https:\/\/[^"]+\.mp4[^"]*)"/i);
+      if (!match) throw new Error("getfvid: no link found");
+      return { url: match[1], title: "Facebook Video" };
+    },
+  ];
+
+  for (let i = 0; i < services.length; i++) {
+    try {
+      const result = await services[i]();
+      if (result && result.url) {
+        console.log("[FBDL] Got link from service " + i);
+        return result;
+      }
+    } catch(e) {
+      console.log("[FBDL] Service " + i + " failed:", e.message);
+    }
+  }
+  throw new Error("All Facebook download services failed");
 }
 
 // ── Download file to disk (URL or stream) ────────────────────────────────────
