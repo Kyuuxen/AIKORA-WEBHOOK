@@ -53,105 +53,41 @@ function buildContext(uid, msg) {
 }
 
 // AI Models
-const AI_MODELS = [
-  {
-    key: "copilot", name: "Copilot",
-    call: function(uid, msg, sys) {
-      return axios.get("https://api-library-kohi.onrender.com/api/copilot", {
-        params: { prompt: sys + "\n\n" + buildContext(uid, msg), model: "default", user: uid },
-        timeout: 20000
-      }).then(function(r) { return (r.data && r.data.data && r.data.data.text) ? r.data.data.text : null; });
-    }
-  },
-  {
-    key: "gpt5", name: "GPT-5",
-    call: function(uid, msg, sys) {
-      return axios.get("https://api-library-kohi.onrender.com/api/pollination-ai", {
-        params: { prompt: sys + "\n\nUser: " + msg, model: "openai-large", user: uid },
-        timeout: 20000
-      }).then(function(r) { return (r.data && r.data.data) ? r.data.data : null; });
-    }
-  },
-  {
-    key: "aria", name: "Aria",
-    call: function(uid, msg) {
-      return axios.get("https://betadash-api-swordslush-production.up.railway.app/Aria", {
-        params: { ask: msg, userid: uid },
-        timeout: 20000
-      }).then(function(r) { return (r.data && (r.data.message || r.data.response || r.data.reply)) ? (r.data.message || r.data.response || r.data.reply) : null; });
-    }
-  },
-  {
-    key: "you", name: "You.com",
-    call: function(uid, msg) {
-      return axios.get("https://betadash-api-swordslush-production.up.railway.app/you", {
-        params: { chat: msg },
-        timeout: 20000
-      }).then(function(r) { return (r.data && (r.data.message || r.data.response)) ? (r.data.message || r.data.response) : null; });
-    }
-  },{
-  key: "perplexity", name: "Perplexity",
-  call: function(uid, msg, sys) {
-    return axios.get("https://api-library-kohi.onrender.com/api/pollination-ai", {
-      params: { prompt: msg, model: "perplexity-reasoning", user: uid + "_p" },
-      timeout: 20000
-    }).then(function(r) {
-      if (!r.data || !r.data.data) return null;
-      var reply = r.data.data;
-      var lines = reply.split("\n");
-      var clean = [];
-      for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
-        var low = line.toLowerCase();
-        if (low.indexOf("perplexity") !== -1) continue;
-        if (low.indexOf("search assistant") !== -1) continue;
-        if (low.indexOf("trained by") !== -1) continue;
-        if (low.indexOf("i can't adopt") !== -1) continue;
-        if (low.indexOf("i need to clarify") !== -1) continue;
-        if (low.indexOf("roleplay") !== -1) continue;
-        line = line.replace(/\*\*/g, "");
-        line = line.replace(/\*/g, "");
-        line = line.replace(/\[(\d+)\]/g, "");
-        line = line.replace(/^#{1,6}\s/, "");
-        clean.push(line);
-      }
-      var result = clean.join("\n").trim();
-      return result || null;
-    });
-  }
-},
-  {
-    key: "mistral", name: "Mistral",
-    call: function(uid, msg, sys) {
-      return axios.get("https://api-library-kohi.onrender.com/api/pollination-ai", {
-        params: { prompt: sys + "\n\nUser: " + msg, model: "mistral", user: uid + "_m" },
-        timeout: 20000
-      }).then(function(r) { return (r.data && r.data.data) ? r.data.data : null; });
-    }
-  }
-];
-
-// Ask AI
+// ── Claude AI via Pollinations ───────────────────────────────────────────────
 async function askAI(uid, message) {
-  const sys = "You are " + BOTNAME + ", a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use emojis sometimes. Never say you are Copilot or GPT - you are always " + BOTNAME + ".";
-  const selectedKey = (global.aiMode && global.aiMode !== "auto") ? global.aiMode : null;
-  const selected    = selectedKey ? AI_MODELS.find(function(m) { return m.key === selectedKey; }) : null;
+  // Build system prompt with bot commands from GitHub (via aimode module)
+  let sys = "You are " + BOTNAME + ", a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use Taglish (mix of Tagalog and English) when appropriate. Use emojis sometimes. Never say you are Claude or any other AI — you are always " + BOTNAME + ".";
 
-  if (selected) {
-    try {
-      const r = await selected.call(uid, message, sys);
-      if (r && r.trim()) { logger.log("AI: " + selected.name + " (selected)", "AI"); return r.trim(); }
-    } catch(e) { logger.log(selected.name + " failed: " + e.message, "WARN"); }
-  }
+  // Add bot commands context if aimode module has loaded it
+  try {
+    if (global.aiBotContext && global.aiBotContext.commands && global.aiBotContext.commands.length) {
+      const prefix  = process.env.PREFIX || "!";
+      const cmdList = global.aiBotContext.commands.map(function(c) { return prefix + c; }).join(", ");
+      sys += "\n\nAVAILABLE BOT COMMANDS: " + cmdList;
+      sys += "\nIf a user asks about a command, answer based on this list. Never make up commands that are not in the list.";
+    }
+  } catch(e) {}
 
-  for (let i = 0; i < AI_MODELS.length; i++) {
-    const model = AI_MODELS[i];
-    if (selected && model.key === selected.key) continue;
-    try {
-      const r = await model.call(uid, message, sys);
-      if (r && r.trim()) { logger.log("AI: " + model.name, "AI"); return r.trim(); }
-    } catch(e) { logger.log(model.name + " failed: " + e.message, "WARN"); }
-  }
+  try {
+    const res = await axios.post(
+      "https://text.pollinations.ai/",
+      {
+        messages: [
+          { role: "system", content: sys },
+          { role: "user",   content: message },
+        ],
+        model: "claude-hybridspace",
+        seed:  Math.floor(Math.random() * 9999),
+      },
+      { headers: { "Content-Type": "application/json" }, timeout: 30000 }
+    );
+    const text = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
+    if (text && text.trim().length > 2) {
+      logger.log("AI: Claude", "AI");
+      return text.trim();
+    }
+  } catch(e) { logger.log("Claude failed: " + e.message, "WARN"); }
+
   return null;
 }
 
@@ -395,6 +331,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async function() {
   logger.log(BOTNAME + " running on port " + PORT, "SYSTEM");
   logger.log("Commands: " + commands.size, "SYSTEM");
-  logger.log("AI chain: " + AI_MODELS.map(function(m) { return m.name; }).join(" -> "), "SYSTEM");
+  logger.log("AI: Claude (Pollinations)", "SYSTEM");
   await setPageOnline();
 });
