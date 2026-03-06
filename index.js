@@ -75,12 +75,22 @@ async function askAI(uid, message) {
   const messages  = [];
 
   // Add conversation history (last 6 messages)
-  rawMemory.slice(-6).forEach(function(x) {
-    messages.push({ role: x.role === "user" ? "user" : "assistant", content: x.text });
-  });
+  // Anthropic requires alternating user/assistant roles
+  const history = rawMemory.slice(-6);
+  for (let i = 0; i < history.length; i++) {
+    const role = history[i].role === "user" ? "user" : "assistant";
+    // Skip if same role as previous (Anthropic doesn't allow consecutive same roles)
+    if (messages.length > 0 && messages[messages.length - 1].role === role) continue;
+    messages.push({ role: role, content: String(history[i].text || "") });
+  }
+
+  // Make sure last message before current is not "user" (would cause consecutive user messages)
+  if (messages.length > 0 && messages[messages.length - 1].role === "user") {
+    messages.pop();
+  }
 
   // Add current message
-  messages.push({ role: "user", content: message });
+  messages.push({ role: "user", content: String(message || "") });
 
   // Use official Anthropic API if key is set
   if (apiKey) {
@@ -361,15 +371,13 @@ app.post("/webhook", async function(req, res) {
 
 // Status page
 app.get("/", function(req, res) {
-  const mode  = global.aiMode || "auto";
-  const model = AI_MODELS.find(function(m) { return m.key === mode; });
   res.send(
     "<html><head><title>" + BOTNAME + "</title></head>" +
     "<body style='font-family:sans-serif;text-align:center;padding:50px;background:#1a1a2e;color:white'>" +
     "<h1>" + BOTNAME + "</h1>" +
     "<p style='color:#00ff88'>Online</p>" +
     "<p>Commands: " + commands.size + "</p>" +
-    "<p>AI Mode: " + (model ? model.name : "Auto") + "</p>" +
+    "<p>AI: Claude (Anthropic)</p>" +
     "<p>Prefix: " + PREFIX + "</p>" +
     "</body></html>"
   );
