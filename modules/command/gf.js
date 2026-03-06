@@ -8,28 +8,40 @@ module.exports.config = {
 };
 
 module.exports.run = async function ({ api, args, event }) {
-  const senderId = event.senderId;
-  const input = args.join(" ").trim();
-  
-  if (!input) return api.send("Usage: !gf [your input]");
-  
+  if (!args || args.length === 0) {
+    return api.sendMessage("Usage: !gf [your input]", event.threadID, event.messageID);
+  }
+
   const senderName = event.senderName || "darling";
-  const lower = input.toLowerCase();
+  const input = args.join(" ").trim().toLowerCase();
+
   try {
-    if (lower.includes("joke") || lower.includes("laugh")) {
+    if (input.includes("joke") || input.includes("laugh")) {
       const jokeRes = await axios.get("https://official-joke-api.appspot.com/jokes/random");
       const joke = `${jokeRes.data.setup}\n${jokeRes.data.punchline}`;
-      return api.send(`😂 Hey ${senderName}! Here’s a joke for you:\n\n${joke}\n\nHope it made you smile!`);
-    } else if (lower.includes("quote") || lower.includes("inspire")) {
+      return api.sendMessage(
+        `😂 Hey ${senderName}! Here’s a joke for you:\n\n${joke}\n\nHope it made you smile!`,
+        event.threadID,
+        event.messageID
+      );
+    } else if (input.includes("quote") || input.includes("inspire")) {
       const quoteRes = await axios.get("https://api.quotable.io/random");
       const quote = `"${quoteRes.data.content}" — ${quoteRes.data.author}`;
-      return api.send(`💬 ${senderName}, here's a thoughtful quote for you:\n\n${quote}\n\nFeel the vibes!`);
+      return api.sendMessage(
+        `💬 ${senderName}, here's a thoughtful quote for you:\n\n${quote}\n\nFeel the vibes!`,
+        event.threadID,
+        event.messageID
+      );
     } else {
       const loveRes = await axios.get("https://api.quotable.io/random?tags=life,love");
       const loveQuote = `"${loveRes.data.content}"`;
-      return api.send(`💖 Hi ${senderName}! I saw something that made me think of you:\n\n${loveQuote}\n\nTell me what you’d like to talk about next!`);
+      return api.sendMessage(
+        `💖 Hi ${senderName}! I saw something that made me think of you:\n\n${loveQuote}\n\nTell me what you’d like to talk about next!`,
+        event.threadID,
+        event.messageID
+      );
     }
   } catch (err) {
-    return api.send("❌ Something went wrong. Please try again.");
+    return api.sendMessage("❌ Something went wrong. Please try again.", event.threadID, event.messageID);
   }
 };
