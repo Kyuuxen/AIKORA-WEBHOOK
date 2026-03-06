@@ -48,7 +48,7 @@ async function sendTo(recipientId, text) {
       }
     );
   } catch(e) {
-    console.error("[LiveChat] sendTo failed:", e.message);
+    console.error("[Admin] sendTo failed:", e.message);
   }
 }
 
@@ -73,7 +73,7 @@ module.exports.run = async function ({ api, args, event }) {
   // ── ADMIN COMMANDS ──────────────────────────────────────────────────────────
   if (isAdmin(uid)) {
 
-    // !livechat end — admin ends current session
+    // !admin end — admin ends current session
     if (action === "end" || action === "stop" || action === "close") {
       const userId = sessions.adminToUser.get(uid);
       if (!userId) return api.send("ℹ️ You have no active live chat session.");
@@ -84,7 +84,7 @@ module.exports.run = async function ({ api, args, event }) {
       await sendTo(userId,
         "━━━━━━━━━━━━━━\n" +
         "📴 Admin has ended the live chat.\n" +
-        "Thank you for reaching out! Type !livechat to start again.\n" +
+        "Thank you for reaching out! Type !admin to start again.\n" +
         "━━━━━━━━━━━━━━"
       );
       return api.send(
@@ -95,7 +95,7 @@ module.exports.run = async function ({ api, args, event }) {
       );
     }
 
-    // !livechat sessions — admin sees active sessions
+    // !admin sessions — admin sees active sessions
     if (action === "sessions" || action === "list") {
       if (sessions.userToAdmin.size === 0) {
         return api.send("📋 No active live chat sessions.");
@@ -112,10 +112,10 @@ module.exports.run = async function ({ api, args, event }) {
     if (!sessions.adminToUser.has(uid)) {
       return api.send(
         "ℹ️ No active live chat session.\n\n" +
-        "When a user starts !livechat, you will be connected automatically.\n\n" +
+        "When a user starts !admin, you will be connected automatically.\n\n" +
         "Commands:\n" +
-        "!livechat end      — End current session\n" +
-        "!livechat sessions — View all active sessions"
+        "!admin end      — End current session\n" +
+        "!admin sessions — View all active sessions"
       );
     }
   }
@@ -137,7 +137,7 @@ module.exports.run = async function ({ api, args, event }) {
     return api.send(
       "━━━━━━━━━━━━━━\n" +
       "📴 Live chat ended.\n" +
-      "Thanks for chatting! Type !livechat to start again anytime.\n" +
+      "Thanks for chatting! Type !admin to start again anytime.\n" +
       "━━━━━━━━━━━━━━"
     );
   }
@@ -147,7 +147,7 @@ module.exports.run = async function ({ api, args, event }) {
     return api.send(
       "💬 You are already in a live chat session!\n\n" +
       "Just type your message to chat with admin.\n" +
-      "Type !livechat end to stop."
+      "Type !admin end to stop."
     );
   }
 
@@ -180,7 +180,7 @@ module.exports.run = async function ({ api, args, event }) {
     "🔔 New Live Chat!\n" +
     "User ID: " + uid + "\n" +
     "Just reply normally to chat with them.\n" +
-    "Type !livechat end to stop.\n" +
+    "Type !admin end to stop.\n" +
     "━━━━━━━━━━━━━━"
   );
 
@@ -190,34 +190,36 @@ module.exports.run = async function ({ api, args, event }) {
     "✅ Connected to Admin!\n\n" +
     "💬 You can now chat directly.\n" +
     "Just type your message!\n\n" +
-    "Type !livechat end to stop.\n" +
+    "Type !admin end to stop.\n" +
     "━━━━━━━━━━━━━━"
   );
 };
 
-// ── Handle incoming messages (relay between user and admin) ───────────────────
-module.exports.handleMessage = async function ({ api, event }) {
-  if (!event.body) return;
-  const uid  = event.senderId;
-  const text = event.body.trim();
+// ── Relay function called directly by index.js ───────────────────────────────
+module.exports.relay = async function (uid, text) {
   const prefix = process.env.PREFIX || "!";
 
   // Ignore commands
-  if (text.startsWith(prefix)) return;
+  if (text.startsWith(prefix)) return false;
 
-  // ── Admin sending to user ───────────────────────────────────────────────────
+  // ── Admin sending to user ─────────────────────────────────────────────────
   if (isAdmin(uid) && sessions.adminToUser.has(uid)) {
     const userId = sessions.adminToUser.get(uid);
     await sendTo(userId, "👨‍💼 Admin: " + text);
-    console.log("[LiveChat] Admin → User: " + text.substring(0, 50));
-    return;
+    console.log("[Admin] Admin → User: " + text.substring(0, 50));
+    return true; // message was handled, stop AI reply
   }
 
-  // ── User sending to admin ───────────────────────────────────────────────────
+  // ── User sending to admin ─────────────────────────────────────────────────
   if (sessions.userToAdmin.has(uid)) {
     const session = sessions.userToAdmin.get(uid);
-    await sendTo(session.adminId, "👤 User (" + uid + "): " + text);
-    console.log("[LiveChat] User → Admin: " + text.substring(0, 50));
-    return;
+    await sendTo(session.adminId, "👤 User: " + text);
+    console.log("[Admin] User → Admin: " + text.substring(0, 50));
+    return true; // message was handled, stop AI reply
   }
+
+  return false; // not in session, let AI handle it
 };
+
+// ── handleMessage still needed for downloader auto-detect etc ─────────────────
+module.exports.handleMessage = async function ({ api, event }) {};
