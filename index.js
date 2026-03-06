@@ -12,15 +12,32 @@ const loadCommands = function() {
   const commands  = new Map();
   const cmdFolder = path.join(__dirname, "modules/command");
   if (!fs.existsSync(cmdFolder)) return commands;
+
   fs.readdirSync(cmdFolder).filter(function(f){ return f.endsWith(".js"); }).forEach(function(file) {
     try {
-      const cmd = require(path.join(cmdFolder, file));
-      if (cmd.config && cmd.config.name && typeof cmd.run === "function") {
-        commands.set(cmd.config.name.toLowerCase(), cmd);
-        console.log("[SUCCESS] Loaded: " + cmd.config.name);
+      const mod = require(path.join(cmdFolder, file));
+
+      // Load main command
+      if (mod.config && mod.config.name && typeof mod.run === "function") {
+        commands.set(mod.config.name.toLowerCase(), mod);
+        console.log("[SUCCESS] Loaded: " + mod.config.name);
       }
+
+      // Load sub-commands (e.g. module.exports.fbdl = { config, run })
+      Object.keys(mod).forEach(function(key) {
+        if (key === "config" || key === "run" || key === "handleMessage") return;
+        const sub = mod[key];
+        if (sub && sub.config && sub.config.name && typeof sub.run === "function") {
+          // Attach handleMessage from parent if sub doesnt have one
+          if (!sub.handleMessage && mod.handleMessage) sub.handleMessage = mod.handleMessage;
+          commands.set(sub.config.name.toLowerCase(), sub);
+          console.log("[SUCCESS] Loaded sub-command: " + sub.config.name);
+        }
+      });
+
     } catch(e) { console.log("[ERROR] " + file + ": " + e.message); }
   });
+
   return commands;
 };
 
