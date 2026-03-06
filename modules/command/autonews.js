@@ -77,26 +77,65 @@ const NEWS_MODES = {
 const JSONBIN_KEY = process.env.JSONBIN_KEY || "";
 const JSONBIN_BIN = process.env.JSONBIN_BIN || "";
 
-async function dbLoad() {
-  if (!JSONBIN_KEY || !JSONBIN_BIN) return { posted: new Set(), mode: "philippines" };
+// ── Local file backup for posted titles ──────────────────────────────────────
+const LOCAL_DB = "/tmp/autonews_posted.json";
+
+function localSave(postedSet, mode) {
   try {
-    const res = await axios.get("https://api.jsonbin.io/v3/b/" + JSONBIN_BIN + "/latest", {
-      headers: { "X-Master-Key": JSONBIN_KEY },
-      timeout: 10000,
-    });
-    const rec = res.data && res.data.record ? res.data.record : {};
-    console.log("[AutoNews] DB loaded: " + (rec.posted ? rec.posted.length : 0) + " titles, mode: " + (rec.mode || "philippines"));
-    return {
-      posted: new Set(rec.posted || []),
-      mode:   rec.mode || "philippines",
-    };
-  } catch(e) {
-    console.log("[AutoNews] DB load failed:", e.message);
-    return { posted: new Set(), mode: "philippines" };
+    const fs = require("fs");
+    fs.writeFileSync(LOCAL_DB, JSON.stringify({
+      posted: Array.from(postedSet).slice(-500),
+      mode:   mode,
+      time:   Date.now(),
+    }));
+  } catch(e) {}
+}
+
+function localLoad() {
+  try {
+    const fs = require("fs");
+    if (!fs.existsSync(LOCAL_DB)) return null;
+    const data = JSON.parse(fs.readFileSync(LOCAL_DB, "utf8"));
+    // Only use local if less than 2 hours old (Render restarts frequently)
+    if (Date.now() - data.time < 2 * 60 * 60 * 1000) {
+      console.log("[AutoNews] Local backup loaded: " + data.posted.length + " titles");
+      return { posted: new Set(data.posted), mode: data.mode };
+    }
+  } catch(e) {}
+  return null;
+}
+
+async function dbLoad() {
+  // Try JSONBin first
+  if (JSONBIN_KEY && JSONBIN_BIN) {
+    try {
+      const res = await axios.get("https://api.jsonbin.io/v3/b/" + JSONBIN_BIN + "/latest", {
+        headers: { "X-Master-Key": JSONBIN_KEY },
+        timeout: 10000,
+      });
+      const rec = res.data && res.data.record ? res.data.record : {};
+      console.log("[AutoNews] JSONBin loaded: " + (rec.posted ? rec.posted.length : 0) + " titles, mode: " + (rec.mode || "philippines"));
+      return {
+        posted: new Set(rec.posted || []),
+        mode:   rec.mode || "philippines",
+      };
+    } catch(e) {
+      console.log("[AutoNews] JSONBin load failed:", e.message);
+    }
   }
+
+  // Fallback to local file
+  const local = localLoad();
+  if (local) return local;
+
+  return { posted: new Set(), mode: "philippines" };
 }
 
 async function dbSave(postedSet, mode) {
+  // Always save locally first (instant, no network)
+  localSave(postedSet, mode);
+
+  // Then save to JSONBin
   if (!JSONBIN_KEY || !JSONBIN_BIN) return;
   try {
     await axios.put(
@@ -104,11 +143,28 @@ async function dbSave(postedSet, mode) {
       { posted: Array.from(postedSet).slice(-1000), mode: mode },
       { headers: { "X-Master-Key": JSONBIN_KEY, "Content-Type": "application/json" }, timeout: 10000 }
     );
-  } catch(e) { console.log("[AutoNews] DB save failed:", e.message); }
+  } catch(e) { console.log("[AutoNews] JSONBin save failed:", e.message); }
 }
 
 function normalizeTitle(title) {
-  return title.toLowerCase().replace(/[^a-z0-9]/g, "").substring(0, 50);
+  // More aggressive normalization to catch duplicates with slight differences
+  return title.toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .replace(/\s+/g, "")
+    .substring(0, 60);
+}
+
+// ── Check if article is duplicate (title similarity check) ────────────────────
+function isDuplicate(title, postedSet) {
+  const normalized = normalizeTitle(title);
+  if (postedSet.has(normalized)) return true;
+
+  // Also check partial match (first 30 chars) to catch rephrased duplicates
+  const partial = normalized.substring(0, 30);
+  for (const posted of postedSet) {
+    if (posted.startsWith(partial)) return true;
+  }
+  return false;
 }
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -304,7 +360,7 @@ async function autoPost(notifyFn) {
     for (let attempt = 0; attempt < 3; attempt++) {
       const articles = await fetchNews();
       for (let i = 0; i < articles.length; i++) {
-        if (articles[i].title && !state.posted.has(normalizeTitle(articles[i].title))) {
+        if (articles[i].title && !isDuplicate(articles[i].title, state.posted)) {
           article = articles[i]; break;
         }
       }
@@ -312,17 +368,30 @@ async function autoPost(notifyFn) {
       console.log("[AutoNews] All articles posted, trying next category...");
     }
     if (!article) {
-      const arr = Array.from(state.posted);
-      state.posted = new Set(arr.slice(Math.floor(arr.length / 2)));
+      // Clear ALL history and retry — news sites don't update that fast
+      console.log("[AutoNews] Clearing full history to find fresh articles...");
+      state.posted.clear();
       await dbSave(state.posted, state.mode);
-      const articles = await fetchNews();
-      for (let i = 0; i < articles.length; i++) {
-        if (articles[i].title && !state.posted.has(normalizeTitle(articles[i].title))) {
-          article = articles[i]; break;
-        }
+
+      // Try all feeds one more time
+      const modeConfig = NEWS_MODES[state.mode] || NEWS_MODES["philippines"];
+      const allFeeds   = modeConfig.rssFeeds || [];
+      for (let f = 0; f < allFeeds.length && !article; f++) {
+        try {
+          const freshArticles = await fetchRSS(allFeeds[f]);
+          for (let i = 0; i < freshArticles.length; i++) {
+            if (freshArticles[i].title && !isDuplicate(freshArticles[i].title, state.posted)) {
+              article = freshArticles[i]; break;
+            }
+          }
+        } catch(e) {}
       }
     }
-    if (!article) { notifyFn("⚠️ No new articles right now."); return; }
+    if (!article) {
+      console.log("[AutoNews] Truly no new articles. Will retry next cycle.");
+      notifyFn("⏳ No new articles yet. Will check again in 15 minutes.");
+      return;
+    }
 
     state.posted.add(normalizeTitle(article.title));
     state.totalPosted++;
