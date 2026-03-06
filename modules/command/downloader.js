@@ -44,107 +44,74 @@ async function getTikTok(url) {
   };
 }
 
-// ── YouTube via @distube/ytdl-core (npm package) ─────────────────────────────
-async function getYouTube(url) {
-  const ytdl = require("@distube/ytdl-core");
-  const info  = await ytdl.getInfo(url, {
-    requestOptions: { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } }
-  });
-  const title   = info.videoDetails.title || "YouTube Video";
-  // Pick best format under 50MB — prefer 360p or 480p
-  const formats = ytdl.filterFormats(info.formats, "videoandaudio");
-  const format  = formats.find(function(f) { return f.qualityLabel === "360p"; })
-                  || formats.find(function(f) { return f.qualityLabel === "480p"; })
-                  || formats.find(function(f) { return f.qualityLabel === "240p"; })
-                  || formats[0];
-  if (!format) throw new Error("No downloadable format found");
-  return { stream: ytdl.downloadFromInfo(info, { format: format }), title: title };
+// ── YouTube & Facebook via Gemini AI link finder ──────────────────────────────
+async function getDownloadLinkViaGemini(url, type) {
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (!geminiKey) throw new Error("GEMINI_API_KEY not set");
+
+  const prompt = [
+    "Find the best free direct download link for this " + type + " video: " + url,
+    "",
+    "Search for working download sites like savefrom.net, y2mate.com, snapsave.app, etc.",
+    "Reply with ONLY a JSON object in this exact format, nothing else:",
+    '{"title": "video title here", "url": "direct download link here"}',
+    "",
+    "If you cannot find a working link, reply with:",
+    '{"title": "", "url": ""}',
+  ].join("\n");
+
+  const res = await axios.post(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + geminiKey,
+    {
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { maxOutputTokens: 256, temperature: 0.1 },
+    },
+    { headers: { "Content-Type": "application/json" }, timeout: 30000 }
+  );
+
+  const text = res.data &&
+    res.data.candidates &&
+    res.data.candidates[0] &&
+    res.data.candidates[0].content &&
+    res.data.candidates[0].content.parts &&
+    res.data.candidates[0].content.parts[0].text
+      ? res.data.candidates[0].content.parts[0].text.trim()
+      : null;
+
+  if (!text) throw new Error("Gemini returned empty response");
+
+  // Parse JSON from response
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("Gemini did not return valid JSON");
+
+  const parsed = JSON.parse(jsonMatch[0]);
+  if (!parsed.url || parsed.url.length < 10) {
+    throw new Error("Gemini could not find a download link");
+  }
+
+  return { url: parsed.url, title: parsed.title || (type + " Video") };
 }
 
-// ── Facebook via savevideo.me (scraping) ─────────────────────────────────────
-async function getFacebook(url) {
-  // Try multiple services
-  const services = [
-    async function() {
-      // fdown.net
-      const r1 = await axios.get("https://fdown.net/", { timeout: 10000 });
-      const token = (r1.data.match(/name="_token"\s+value="([^"]+)"/) || [])[1];
-      if (!token) throw new Error("No token");
-      const r2 = await axios.post("https://fdown.net/download.php",
-        "_token=" + encodeURIComponent(token) + "&URLz=" + encodeURIComponent(url),
-        { headers: { "Content-Type": "application/x-www-form-urlencoded", "Referer": "https://fdown.net/", "User-Agent": "Mozilla/5.0" }, timeout: 15000 }
-      );
-      const hdMatch = (r2.data.match(/href="(https:\/\/[^"]+)"[^>]*>\s*Download\s*HD/i) || []);
-      const sdMatch = (r2.data.match(/href="(https:\/\/[^"]+)"[^>]*>\s*Download\s*(SD|Normal)/i) || []);
-      const dlUrl = hdMatch[1] || sdMatch[1];
-      if (!dlUrl) throw new Error("fdown: no link found");
-      return { url: dlUrl, title: "Facebook Video" };
-    },
-    async function() {
-      // saveig.app which handles facebook too
-      const res = await axios.post(
-        "https://snapsave.app/action.php",
-        "url=" + encodeURIComponent(url),
-        { headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0", "Referer": "https://snapsave.app/" }, timeout: 15000 }
-      );
-      const html = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
-      const match = html.match(/href="(https:\/\/[^"]+\.mp4[^"]*)"/i);
-      if (!match) throw new Error("snapsave: no link found");
-      return { url: match[1], title: "Facebook Video" };
-    },
-    async function() {
-      // getfvid.com
-      const res = await axios.post(
-        "https://www.getfvid.com/downloader",
-        "url=" + encodeURIComponent(url),
-        { headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0", "Referer": "https://www.getfvid.com/" }, timeout: 15000 }
-      );
-      const html = res.data;
-      const match = html.match(/href="(https:\/\/video[^"]+\.mp4[^"]*)"/i)
-                 || html.match(/href="(https:\/\/[^"]+\.mp4[^"]*)"/i);
-      if (!match) throw new Error("getfvid: no link found");
-      return { url: match[1], title: "Facebook Video" };
-    },
-  ];
+async function getYouTube(url) {
+  return await getDownloadLinkViaGemini(url, "YouTube");
+}
 
-  for (let i = 0; i < services.length; i++) {
-    try {
-      const result = await services[i]();
-      if (result && result.url) {
-        console.log("[FBDL] Got link from service " + i);
-        return result;
-      }
-    } catch(e) {
-      console.log("[FBDL] Service " + i + " failed:", e.message);
-    }
-  }
-  throw new Error("All Facebook download services failed");
+async function getFacebook(url) {
+  return await getDownloadLinkViaGemini(url, "Facebook");
 }
 
 // ── Download file to disk (URL or stream) ────────────────────────────────────
-async function downloadFile(urlOrStream, type) {
+async function downloadFile(url, type) {
   const fname    = type + "_" + Date.now() + ".mp4";
   const filePath = path.join(TMP_DIR, fname);
 
-  if (urlOrStream && typeof urlOrStream === "object" && urlOrStream.pipe) {
-    // It's a readable stream (YouTube)
-    await new Promise(function(resolve, reject) {
-      const ws = fs.createWriteStream(filePath);
-      urlOrStream.pipe(ws);
-      ws.on("finish", resolve);
-      ws.on("error", reject);
-      urlOrStream.on("error", reject);
-    });
-  } else {
-    // It's a URL string
-    const res = await axios.get(urlOrStream, {
-      responseType:     "arraybuffer",
-      timeout:          120000,
-      maxContentLength: 50 * 1024 * 1024,
-      headers:          { "User-Agent": "Mozilla/5.0", "Referer": "https://www.tiktok.com/" },
-    });
-    fs.writeFileSync(filePath, Buffer.from(res.data));
-  }
+  const res = await axios.get(url, {
+    responseType:     "arraybuffer",
+    timeout:          120000,
+    maxContentLength: 50 * 1024 * 1024,
+    headers:          { "User-Agent": "Mozilla/5.0", "Referer": "https://www.tiktok.com/" },
+  });
+  fs.writeFileSync(filePath, Buffer.from(res.data));
 
   const size = fs.statSync(filePath).size;
   if (size < 10000) throw new Error("Downloaded file too small (" + size + " bytes)");
@@ -185,8 +152,7 @@ async function handleDownload(api, event, url, type) {
     else if (type === "facebook") info = await getFacebook(url);
     else throw new Error("Unknown type");
 
-    const downloadSrc = info.stream || info.url;
-    const { filePath: fp, mb } = await downloadFile(downloadSrc, type);
+    const { filePath: fp, mb } = await downloadFile(info.url, type);
     filePath = fp;
 
     await api.send(EMOJI[type] + " " + info.title + "\n📦 " + mb + "MB");
