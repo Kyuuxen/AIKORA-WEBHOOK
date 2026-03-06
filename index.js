@@ -53,21 +53,61 @@ function buildContext(uid, msg) {
 }
 
 // AI Models
-// ── Claude AI via Pollinations ───────────────────────────────────────────────
+// ── Claude AI via official Anthropic API ─────────────────────────────────────
 async function askAI(uid, message) {
-  // Build system prompt with bot commands from GitHub (via aimode module)
-  let sys = "You are " + BOTNAME + ", a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use Taglish (mix of Tagalog and English) when appropriate. Use emojis sometimes. Never say you are Claude or any other AI — you are always " + BOTNAME + ".";
+  const apiKey = process.env.ANTHROPIC_API_KEY;
 
-  // Add bot commands context if aimode module has loaded it
+  // Build system prompt
+  let sys = "You are " + BOTNAME + ", a friendly AI assistant on Facebook Messenger. Be helpful and concise. Use Taglish (mix of Tagalog and English) when appropriate. Use emojis sometimes. Never say you are Claude or any AI — you are always " + BOTNAME + ".";
+
+  // Add bot commands context
   try {
     if (global.aiBotContext && global.aiBotContext.commands && global.aiBotContext.commands.length) {
       const prefix  = process.env.PREFIX || "!";
       const cmdList = global.aiBotContext.commands.map(function(c) { return prefix + c; }).join(", ");
       sys += "\n\nAVAILABLE BOT COMMANDS: " + cmdList;
-      sys += "\nIf a user asks about a command, answer based on this list. Never make up commands that are not in the list.";
+      sys += "\nIf user asks about a command, check the list and answer accurately. Never make up commands not in the list.";
     }
   } catch(e) {}
 
+  // Build conversation history for context
+  const history = buildContext(uid, message);
+
+  // Use official Anthropic API if key is set
+  if (apiKey) {
+    try {
+      const res = await axios.post(
+        "https://api.anthropic.com/v1/messages",
+        {
+          model:      "claude-haiku-4-5-20251001",
+          max_tokens: 1024,
+          system:     sys,
+          messages:   [{ role: "user", content: history }],
+        },
+        {
+          headers: {
+            "x-api-key":         apiKey,
+            "anthropic-version": "2023-06-01",
+            "content-type":      "application/json",
+          },
+          timeout: 30000,
+        }
+      );
+      const text = res.data && res.data.content && res.data.content[0] && res.data.content[0].text
+        ? res.data.content[0].text
+        : null;
+      if (text && text.trim().length > 2) {
+        logger.log("AI: Claude (Anthropic API)", "AI");
+        return text.trim();
+      }
+    } catch(e) {
+      logger.log("Anthropic API failed: " + e.message, "WARN");
+    }
+  } else {
+    logger.log("ANTHROPIC_API_KEY not set — falling back to Pollinations", "WARN");
+  }
+
+  // Fallback to Pollinations if no API key or API failed
   try {
     const res = await axios.post(
       "https://text.pollinations.ai/",
@@ -83,10 +123,10 @@ async function askAI(uid, message) {
     );
     const text = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
     if (text && text.trim().length > 2) {
-      logger.log("AI: Claude", "AI");
+      logger.log("AI: Claude (Pollinations fallback)", "AI");
       return text.trim();
     }
-  } catch(e) { logger.log("Claude failed: " + e.message, "WARN"); }
+  } catch(e) { logger.log("Pollinations fallback failed: " + e.message, "WARN"); }
 
   return null;
 }
@@ -202,7 +242,7 @@ async function handleAI(senderId, text) {
   logger.log("AI from " + senderId + ": " + text, "AI");
   addMemory(senderId, "user", text);
   const reply = await askAI(senderId, text);
-  if (!reply) { await sendMessage(senderId, "Sorry, AI is busy right now. Try again in a moment!"); return; }
+  if (!reply) { await sendMessage(senderId, "Sandali lang, ulit ka mag-message! 😊"); return; }
   addMemory(senderId, "bot", reply);
   await sendMessage(senderId, reply);
 }
