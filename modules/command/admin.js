@@ -7,16 +7,18 @@ module.exports.config = {
   category:    "Utility",
 };
 
-// ── Session state ─────────────────────────────────────────────────────────────
-if (!global.liveChatSessions) {
-  global.liveChatSessions = {
-    // userId -> { adminId, startTime, userName }
+// ── Session state (always reference global directly) ──────────────────────────
+if (!global.adminChatSessions) {
+  global.adminChatSessions = {
     userToAdmin: new Map(),
-    // adminId -> userId (which user admin is currently chatting with)
     adminToUser: new Map(),
   };
 }
-const sessions = global.liveChatSessions;
+
+// Always use getter so relay() always gets fresh global state
+function getSessions() {
+  return global.adminChatSessions;
+}
 
 // ── Get admin IDs ─────────────────────────────────────────────────────────────
 function getAdmins() {
@@ -75,11 +77,11 @@ module.exports.run = async function ({ api, args, event }) {
 
     // !admin end — admin ends current session
     if (action === "end" || action === "stop" || action === "close") {
-      const userId = sessions.adminToUser.get(uid);
+      const userId = getSessions().adminToUser.get(uid);
       if (!userId) return api.send("ℹ️ You have no active live chat session.");
 
-      sessions.adminToUser.delete(uid);
-      sessions.userToAdmin.delete(userId);
+      getSessions().adminToUser.delete(uid);
+      getSessions().userToAdmin.delete(userId);
 
       await sendTo(userId,
         "━━━━━━━━━━━━━━\n" +
@@ -97,11 +99,11 @@ module.exports.run = async function ({ api, args, event }) {
 
     // !admin sessions — admin sees active sessions
     if (action === "sessions" || action === "list") {
-      if (sessions.userToAdmin.size === 0) {
+      if (getSessions().userToAdmin.size === 0) {
         return api.send("📋 No active live chat sessions.");
       }
       let msg = "📋 Active Sessions:\n━━━━━━━━━━━━━━\n";
-      sessions.userToAdmin.forEach(function(data, userId) {
+      getSessions().userToAdmin.forEach(function(data, userId) {
         msg += "👤 User: " + userId + "\n";
         msg += "⏱️ Duration: " + elapsed(data.startTime) + "\n\n";
       });
@@ -109,7 +111,7 @@ module.exports.run = async function ({ api, args, event }) {
     }
 
     // Admin has no active session and no special command
-    if (!sessions.adminToUser.has(uid)) {
+    if (!getSessions().adminToUser.has(uid)) {
       return api.send(
         "ℹ️ No active live chat session.\n\n" +
         "When a user starts !admin, you will be connected automatically.\n\n" +
@@ -122,11 +124,11 @@ module.exports.run = async function ({ api, args, event }) {
 
   // ── USER: stop/end ──────────────────────────────────────────────────────────
   if (action === "end" || action === "stop" || action === "close") {
-    const session = sessions.userToAdmin.get(uid);
+    const session = getSessions().userToAdmin.get(uid);
     if (!session) return api.send("ℹ️ You have no active live chat session.");
 
-    sessions.userToAdmin.delete(uid);
-    sessions.adminToUser.delete(session.adminId);
+    getSessions().userToAdmin.delete(uid);
+    getSessions().adminToUser.delete(session.adminId);
 
     await sendTo(session.adminId,
       "━━━━━━━━━━━━━━\n" +
@@ -143,7 +145,7 @@ module.exports.run = async function ({ api, args, event }) {
   }
 
   // ── USER: start session ─────────────────────────────────────────────────────
-  if (sessions.userToAdmin.has(uid)) {
+  if (getSessions().userToAdmin.has(uid)) {
     return api.send(
       "💬 You are already in a live chat session!\n\n" +
       "Just type your message to chat with admin.\n" +
@@ -154,7 +156,7 @@ module.exports.run = async function ({ api, args, event }) {
   // Find available admin (not already chatting)
   let availableAdmin = null;
   for (let i = 0; i < admins.length; i++) {
-    if (!sessions.adminToUser.has(admins[i])) {
+    if (!getSessions().adminToUser.has(admins[i])) {
       availableAdmin = admins[i];
       break;
     }
@@ -168,11 +170,11 @@ module.exports.run = async function ({ api, args, event }) {
   }
 
   // Create session
-  sessions.userToAdmin.set(uid, {
+  getSessions().userToAdmin.set(uid, {
     adminId:   availableAdmin,
     startTime: Date.now(),
   });
-  sessions.adminToUser.set(availableAdmin, uid);
+  getSessions().adminToUser.set(availableAdmin, uid);
 
   // Notify admin
   await sendTo(availableAdmin,
@@ -197,28 +199,36 @@ module.exports.run = async function ({ api, args, event }) {
 
 // ── Relay function called directly by index.js ───────────────────────────────
 module.exports.relay = async function (uid, text) {
-  const prefix = process.env.PREFIX || "!";
+  const prefix   = process.env.PREFIX || "!";
+  const s        = getSessions();
+  const admins   = getAdmins();
 
   // Ignore commands
   if (text.startsWith(prefix)) return false;
 
+  // Debug log every relay call
+  console.log("[Admin] relay() called — uid:" + uid + " isAdmin:" + isAdmin(uid) +
+    " inAdminMap:" + s.adminToUser.has(uid) +
+    " inUserMap:"  + s.userToAdmin.has(uid) +
+    " sessions:"   + s.userToAdmin.size);
+
   // ── Admin sending to user ─────────────────────────────────────────────────
-  if (isAdmin(uid) && sessions.adminToUser.has(uid)) {
-    const userId = sessions.adminToUser.get(uid);
+  if (isAdmin(uid) && s.adminToUser.has(uid)) {
+    const userId = s.adminToUser.get(uid);
     await sendTo(userId, "👨‍💼 Admin: " + text);
-    console.log("[Admin] Admin → User: " + text.substring(0, 50));
-    return true; // message was handled, stop AI reply
+    console.log("[Admin] Admin → User " + userId + ": " + text.substring(0, 50));
+    return true;
   }
 
   // ── User sending to admin ─────────────────────────────────────────────────
-  if (sessions.userToAdmin.has(uid)) {
-    const session = sessions.userToAdmin.get(uid);
+  if (s.userToAdmin.has(uid)) {
+    const session = s.userToAdmin.get(uid);
     await sendTo(session.adminId, "👤 User: " + text);
-    console.log("[Admin] User → Admin: " + text.substring(0, 50));
-    return true; // message was handled, stop AI reply
+    console.log("[Admin] User " + uid + " → Admin " + session.adminId + ": " + text.substring(0, 50));
+    return true;
   }
 
-  return false; // not in session, let AI handle it
+  return false;
 };
 
 // ── handleMessage still needed for downloader auto-detect etc ─────────────────
