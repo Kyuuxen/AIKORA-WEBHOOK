@@ -157,13 +157,20 @@ async function postToPage(article) {
 }
 
 // ── Global state ──────────────────────────────────────────────────────────────
+// Only init once — prevent duplicate intervals on module reload
 if (!global.autoNewsState) {
-  global.autoNewsState = { enabled: false, interval: null, posted: new Set() };
+  global.autoNewsState = { enabled: false, interval: null, posted: new Set(), isPosting: false };
 }
 const state = global.autoNewsState;
 
 // ── Auto post function ────────────────────────────────────────────────────────
 async function autoPost(notifyFn) {
+  // Prevent overlapping posts
+  if (state.isPosting) {
+    console.log("[AutoNews] Already posting, skipping...");
+    return;
+  }
+  state.isPosting = true;
   try {
     // Reload posted from DB every cycle to stay in sync
     const dbPosted = await dbLoad();
@@ -213,12 +220,18 @@ async function autoPost(notifyFn) {
   } catch(e) {
     console.log("[AutoNews] Error:", e.message);
     notifyFn("❌ AutoNews error: " + e.message);
+  } finally {
+    state.isPosting = false;
   }
 }
 
 // ── Start auto posting ────────────────────────────────────────────────────────
 async function startAutoNews(notifyFn) {
-  if (state.interval) clearInterval(state.interval);
+  // Clear any existing interval first to prevent stacking
+  if (state.interval) {
+    clearInterval(state.interval);
+    state.interval = null;
+  }
 
   // Load posted history from DB on start
   const dbPosted = await dbLoad();
@@ -226,18 +239,25 @@ async function startAutoNews(notifyFn) {
 
   state.enabled  = true;
   state.interval = setInterval(function() {
-    autoPost(function(msg) { console.log("[AutoNews]", msg); });
+    // Extra guard: skip if already posting
+    if (!state.isPosting) {
+      autoPost(function(msg) { console.log("[AutoNews]", msg); });
+    }
   }, INTERVAL_MS);
 
-  console.log("[AutoNews] Started. Loaded " + state.posted.size + " posted titles.");
+  console.log("[AutoNews] Started. Interval: " + INTERVAL_MS + "ms. Loaded " + state.posted.size + " titles.");
   notifyFn("✅ AutoNews started! Posting every 15 minutes.");
 }
 
-// ── Auto-start on boot ────────────────────────────────────────────────────────
-setTimeout(function() {
-  startAutoNews(function(msg) { console.log("[AutoNews]", msg); });
-  console.log("[AutoNews] Auto-started on boot.");
-}, 5000);
+// ── Auto-start on boot (only if not already running) ─────────────────────────
+if (!state.interval) {
+  setTimeout(function() {
+    startAutoNews(function(msg) { console.log("[AutoNews]", msg); });
+    console.log("[AutoNews] Auto-started on boot.");
+  }, 5000);
+} else {
+  console.log("[AutoNews] Already running, skipping boot start.");
+}
 
 // ── Command ───────────────────────────────────────────────────────────────────
 module.exports.run = async function ({ api, args }) {
