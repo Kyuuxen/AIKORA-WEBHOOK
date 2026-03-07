@@ -2,508 +2,286 @@ const axios = require("axios");
 
 module.exports.config = {
   name:        "autonews",
-  description: "Auto post news to Facebook Page every 15 minutes",
-  usage:       "!autonews status | test | on | off | reset | mode [mode]",
+  description: "Auto post Philippines news to Facebook Page every 15 minutes",
+  usage:       "!autonews status | test | on | off | reset",
   category:    "Automation",
 };
 
-// ── News modes ────────────────────────────────────────────────────────────────
-const NEWS_MODES = {
-  "philippines": {
-    label:   "🇵🇭 Philippines Only",
-    // Rotates through multiple PH news RSS feeds
-    rssFeeds: [
-      "https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/feed",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://newsinfo.inquirer.net/feed",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://www.philstar.com/rss/headlines",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://mb.com.ph/feed",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://www.gmanetwork.com/news/rss/news",
-    ],
-    gnews: null, // skip gnews for PH mode, RSS is more accurate
+// ── Config ────────────────────────────────────────────────────────────────────
+const GNEWS_KEY   = process.env.GNEWS_API_KEY;
+const PAGE_TOKEN  = process.env.PAGE_FEED_TOKEN || process.env.PAGE_ACCESS_TOKEN;
+const PAGE_ID     = process.env.PAGE_ID;
+const JSONBIN_KEY = process.env.JSONBIN_KEY;
+const JSONBIN_BIN = process.env.JSONBIN_BIN;
+const INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+
+// ── RSS feeds (Philippines) ───────────────────────────────────────────────────
+const RSS_FEEDS = [
+  "https://www.rappler.com/feed",
+  "https://newsinfo.inquirer.net/feed",
+  "https://www.philstar.com/rss/headlines",
+  "https://mb.com.ph/feed",
+  "https://www.gmanetwork.com/news/rss/news",
+];
+
+// ── RSS converters (fallback chain) ──────────────────────────────────────────
+const RSS_CONVERTERS = [
+  function(rssUrl) {
+    return axios.get("https://api.rss2json.com/v1/api.json", {
+      params: { rss_url: rssUrl }, timeout: 15000,
+    }).then(function(r) {
+      const items = r.data && r.data.items ? r.data.items : [];
+      return items.map(function(i) { return { title: i.title, url: i.link }; });
+    });
   },
-  "world": {
-    label:   "🌍 World News",
-    rssFeeds: [
-      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/world/rss.xml",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://rss.cnn.com/rss/edition_world.rss",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.reuters.com/reuters/topNews",
-    ],
-    gnews: { country: "us", lang: "en", topics: ["world", "general"] },
+  function(rssUrl) {
+    return axios.get("https://rss-to-json-serverless-api.vercel.app/api?feedURL=" + encodeURIComponent(rssUrl), {
+      timeout: 15000,
+    }).then(function(r) {
+      const items = r.data && r.data.items ? r.data.items : [];
+      return items.map(function(i) { return { title: i.title, url: i.link || i.url }; });
+    });
   },
-  "technology": {
-    label:   "💻 Technology",
-    rssFeeds: [
-      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.feedburner.com/TechCrunch",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://www.theverge.com/rss/index.xml",
-    ],
-    gnews: { country: "us", lang: "en", topics: ["technology"] },
-  },
-  "sports": {
-    label:   "⚽ Sports",
-    rssFeeds: [
-      "https://api.rss2json.com/v1/api.json?rss_url=https://www.espn.com/espn/rss/news",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/sports/feed",
-    ],
-    gnews: { country: "ph", lang: "en", topics: ["sports"] },
-  },
-  "entertainment": {
-    label:   "🎬 Entertainment",
-    rssFeeds: [
-      "https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/entertainment/feed",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml",
-    ],
-    gnews: { country: "ph", lang: "en", topics: ["entertainment"] },
-  },
-  "business": {
-    label:   "💼 Business",
-    rssFeeds: [
-      "https://api.rss2json.com/v1/api.json?rss_url=https://business.inquirer.net/feed",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/business/rss.xml",
-    ],
-    gnews: { country: "ph", lang: "en", topics: ["business"] },
-  },
-  "mixed": {
-    label:   "🔀 Mixed (All Topics)",
-    rssFeeds: [
-      "https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/feed",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://feeds.bbci.co.uk/news/rss.xml",
-      "https://api.rss2json.com/v1/api.json?rss_url=https://newsinfo.inquirer.net/feed",
-    ],
-    gnews: { country: "ph", lang: "en", topics: ["general", "world", "nation", "business", "technology", "entertainment", "sports"] },
-  },
-};
-
-// ── JSONBin DB ────────────────────────────────────────────────────────────────
-const JSONBIN_KEY = process.env.JSONBIN_KEY || "";
-const JSONBIN_BIN = process.env.JSONBIN_BIN || "";
-
-// ── Local file backup for posted titles ──────────────────────────────────────
-const LOCAL_DB = "/tmp/autonews_posted.json";
-
-function localSave(postedSet, mode) {
-  try {
-    const fs = require("fs");
-    fs.writeFileSync(LOCAL_DB, JSON.stringify({
-      posted: Array.from(postedSet).slice(-500),
-      mode:   mode,
-      time:   Date.now(),
-    }));
-  } catch(e) {}
-}
-
-function localLoad() {
-  try {
-    const fs = require("fs");
-    if (!fs.existsSync(LOCAL_DB)) return null;
-    const data = JSON.parse(fs.readFileSync(LOCAL_DB, "utf8"));
-    // Only use local if less than 2 hours old (Render restarts frequently)
-    if (Date.now() - data.time < 2 * 60 * 60 * 1000) {
-      console.log("[AutoNews] Local backup loaded: " + data.posted.length + " titles");
-      return { posted: new Set(data.posted), mode: data.mode };
-    }
-  } catch(e) {}
-  return null;
-}
-
-async function dbLoad() {
-  // Try JSONBin first
-  if (JSONBIN_KEY && JSONBIN_BIN) {
-    try {
-      const res = await axios.get("https://api.jsonbin.io/v3/b/" + JSONBIN_BIN + "/latest", {
-        headers: { "X-Master-Key": JSONBIN_KEY },
-        timeout: 10000,
-      });
-      const rec = res.data && res.data.record ? res.data.record : {};
-      console.log("[AutoNews] JSONBin loaded: " + (rec.posted ? rec.posted.length : 0) + " titles, mode: " + (rec.mode || "philippines"));
-      return {
-        posted: new Set(rec.posted || []),
-        mode:   rec.mode || "philippines",
-      };
-    } catch(e) {
-      console.log("[AutoNews] JSONBin load failed:", e.message);
-    }
-  }
-
-  // Fallback to local file
-  const local = localLoad();
-  if (local) return local;
-
-  return { posted: new Set(), mode: "philippines" };
-}
-
-async function dbSave(postedSet, mode) {
-  // Always save locally first (instant, no network)
-  localSave(postedSet, mode);
-
-  // Then save to JSONBin
-  if (!JSONBIN_KEY || !JSONBIN_BIN) return;
-  try {
-    await axios.put(
-      "https://api.jsonbin.io/v3/b/" + JSONBIN_BIN,
-      { posted: Array.from(postedSet).slice(-1000), mode: mode },
-      { headers: { "X-Master-Key": JSONBIN_KEY, "Content-Type": "application/json" }, timeout: 10000 }
-    );
-  } catch(e) { console.log("[AutoNews] JSONBin save failed:", e.message); }
-}
-
-function normalizeTitle(title) {
-  // More aggressive normalization to catch duplicates with slight differences
-  return title.toLowerCase()
-    .replace(/[^a-z0-9]/g, "")
-    .replace(/\s+/g, "")
-    .substring(0, 60);
-}
-
-// ── Check if article is duplicate (title similarity check) ────────────────────
-function isDuplicate(title, postedSet) {
-  const normalized = normalizeTitle(title);
-  if (postedSet.has(normalized)) return true;
-
-  // Also check partial match (first 30 chars) to catch rephrased duplicates
-  const partial = normalized.substring(0, 30);
-  for (const posted of postedSet) {
-    if (posted.startsWith(partial)) return true;
-  }
-  return false;
-}
-
-// ── Global state ──────────────────────────────────────────────────────────────
-if (!global.autoNewsState) {
-  global.autoNewsState = {
-    posted:        new Set(),
-    totalPosted:   0,
-    lastPosted:    null,
-    interval:      null,
-    isPosting:     false,
-    categoryIndex: 0,
-    dbReady:       false,
-    mode:          "philippines", // default mode
-  };
-}
-const state = global.autoNewsState;
-
-async function initDB() {
-  if (state.dbReady) return;
-  const data = await dbLoad();
-  data.posted.forEach(function(t) { state.posted.add(t); });
-  state.mode    = data.mode || "philippines";
-  state.dbReady = true;
-  console.log("[AutoNews] DB ready. Mode: " + state.mode + " | " + state.posted.size + " titles loaded.");
-}
-
-// ── Fetch from RSS (tries multiple converters) ────────────────────────────────
-async function fetchRSS(rawRssUrl) {
-  // Extract the actual RSS URL from rss2json wrapper if present
-  const rssUrl = rawRssUrl.includes("rss_url=")
-    ? decodeURIComponent(rawRssUrl.split("rss_url=")[1])
-    : rawRssUrl;
-
-  // Multiple RSS-to-JSON services to try
-  const converters = [
-    "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(rssUrl),
-    "https://rss-to-json-serverless-api.vercel.app/api?feedURL=" + encodeURIComponent(rssUrl),
-    "https://api.allorigins.win/get?url=" + encodeURIComponent(rssUrl),
-  ];
-
-  for (let c = 0; c < converters.length; c++) {
-    try {
-      const res = await axios.get(converters[c], {
-        timeout: 15000,
-        headers: { "User-Agent": "Mozilla/5.0" },
-      });
-
-      let items = [];
-      let feedName = "News";
-
-      // Handle allorigins (returns raw XML as string)
-      if (converters[c].includes("allorigins")) {
-        const xml = res.data && res.data.contents ? res.data.contents : "";
-        // Simple XML parse for title and link
-        const titleMatches = xml.match(/<item[^>]*>[\s\S]*?<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>|<title[^>]*>(.*?)<\/title>/gi) || [];
-        const linkMatches  = xml.match(/<link[^>]*>(.*?)<\/link>/gi) || [];
-        const imgMatches   = xml.match(/<enclosure[^>]*url="([^"]*)"[^>]*>/gi) || [];
-        for (let i = 1; i < titleMatches.length && i <= 10; i++) { // skip feed title (i=0)
-          const rawTitle = titleMatches[i].replace(/<[^>]*>/g,"").replace(/<!\[CDATA\[|\]\]>/g,"").trim();
-          const rawLink  = linkMatches[i] ? linkMatches[i].replace(/<[^>]*>/g,"").trim() : "";
-          const rawImg   = imgMatches[i-1] ? (imgMatches[i-1].match(/url="([^"]*)"/)||[])[1] : null;
-          if (rawTitle && rawLink) {
-            items.push({ title: rawTitle, description: "", url: rawLink, image: rawImg, source: { name: feedName } });
-          }
-        }
-      } else {
-        // Standard rss2json format
-        items = (res.data && res.data.items) ? res.data.items : [];
-        feedName = (res.data && res.data.feed && res.data.feed.title) ? res.data.feed.title : "News";
-        items = items.map(function(item) {
-          return {
-            title:       item.title,
-            description: item.description ? item.description.replace(/<[^>]*>/g, "").substring(0, 200) : "",
-            url:         item.link,
-            image:       (item.enclosure && item.enclosure.link) ? item.enclosure.link : (item.thumbnail || null),
-            source:      { name: feedName },
-          };
-        });
+  function(rssUrl) {
+    return axios.get("https://api.allorigins.win/get?url=" + encodeURIComponent(rssUrl), {
+      timeout: 15000,
+    }).then(function(r) {
+      const xml    = r.data && r.data.contents ? r.data.contents : "";
+      const titles = xml.match(/<title><!\[CDATA\[([^\]]+)\]\]><\/title>/g) || xml.match(/<title>([^<]+)<\/title>/g) || [];
+      const links  = xml.match(/<link>([^<]+)<\/link>/g) || [];
+      const items  = [];
+      for (let i = 1; i < Math.min(titles.length, links.length + 1); i++) {
+        const title = (titles[i] || "").replace(/<[^>]+>/g, "").replace(/<!\[CDATA\[|\]\]>/g, "").trim();
+        const url   = (links[i - 1] || "").replace(/<[^>]+>/g, "").trim();
+        if (title && url) items.push({ title: title, url: url });
       }
+      return items;
+    });
+  },
+];
 
-      if (items.length > 0) {
-        console.log("[AutoNews] RSS converter " + c + " OK: " + items.length + " articles from " + rssUrl.split("/")[2]);
+// ── Fetch from RSS feed ───────────────────────────────────────────────────────
+async function fetchRSS(rssUrl) {
+  for (let i = 0; i < RSS_CONVERTERS.length; i++) {
+    try {
+      const items = await RSS_CONVERTERS[i](rssUrl);
+      if (items && items.length > 0) {
+        console.log("[AutoNews] RSS converter " + i + " OK: " + items.length + " articles from " + rssUrl);
         return items;
       }
     } catch(e) {
-      console.log("[AutoNews] RSS converter " + c + " failed:", e.message);
+      console.log("[AutoNews] RSS converter " + i + " failed: " + e.message);
     }
   }
   return [];
 }
 
-// ── Fetch news based on current mode ─────────────────────────────────────────
-async function fetchNews() {
-  const modeConfig = NEWS_MODES[state.mode] || NEWS_MODES["philippines"];
-
-  // For Philippines mode — ONLY use PH RSS feeds, skip GNews
-  if (!modeConfig.gnews) {
-    const feedIndex = state.categoryIndex % modeConfig.rssFeeds.length;
-    state.categoryIndex++;
-    const feedUrl = modeConfig.rssFeeds[feedIndex];
-    try {
-      const articles = await fetchRSS(feedUrl);
-      console.log("[AutoNews] PH RSS [" + feedIndex + "]: " + articles.length + " articles");
-      if (articles.length > 0) return articles;
-    } catch(e) { console.log("[AutoNews] PH RSS failed:", e.message); }
-
-    // Try next PH feed if first fails
-    for (let i = 0; i < modeConfig.rssFeeds.length; i++) {
-      try {
-        const articles = await fetchRSS(modeConfig.rssFeeds[i]);
-        if (articles.length > 0) return articles;
-      } catch(e) {}
-    }
-    return [];
-  }
-
-  // For other modes — try GNews first, fallback to RSS
-  const gnews  = modeConfig.gnews;
-  const topic  = gnews.topics[state.categoryIndex % gnews.topics.length];
-  state.categoryIndex++;
-
+// ── Fetch from GNews ──────────────────────────────────────────────────────────
+async function fetchGNews() {
+  if (!GNEWS_KEY) return [];
   try {
     const res = await axios.get("https://gnews.io/api/v4/top-headlines", {
-      params: { lang: gnews.lang, country: gnews.country, topic: topic, max: 20, apikey: process.env.GNEWS_API_KEY || "demo" },
+      params: { lang: "en", country: "ph", max: 10, apikey: GNEWS_KEY },
       timeout: 15000,
     });
-    const articles = (res.data && res.data.articles) ? res.data.articles : [];
-    if (articles.length > 0) {
-      console.log("[AutoNews] GNews (" + state.mode + "/" + topic + "): " + articles.length + " articles");
-      return articles;
-    }
-  } catch(e) { console.log("[AutoNews] GNews failed:", e.message); }
-
-  // RSS fallback
-  const feedIdx = state.categoryIndex % modeConfig.rssFeeds.length;
-  try {
-    const articles = await fetchRSS(modeConfig.rssFeeds[feedIdx]);
-    console.log("[AutoNews] RSS fallback: " + articles.length + " articles");
-    if (articles.length > 0) return articles;
-  } catch(e) { console.log("[AutoNews] RSS failed:", e.message); }
-
-  // Last resort — Rappler
-  try {
-    return await fetchRSS("https://api.rss2json.com/v1/api.json?rss_url=https://www.rappler.com/feed");
-  } catch(e) { return []; }
+    const articles = res.data && res.data.articles ? res.data.articles : [];
+    return articles.map(function(a) { return { title: a.title, url: a.url }; });
+  } catch(e) {
+    console.log("[AutoNews] GNews failed:", e.message);
+    return [];
+  }
 }
 
-// ── Rewrite with AI ───────────────────────────────────────────────────────────
-async function rewriteWithAI(text) {
-  try {
-    const res = await axios.get("https://api-library-kohi.onrender.com/api/copilot", {
-      params: { prompt: "Rewrite this as a short engaging Facebook news post (max 3 sentences, no hashtags, no markdown, no asterisks):\n\n" + text },
-      timeout: 25000,
-    });
-    const r = (res.data && res.data.data && res.data.data.text) ? res.data.data.text : null;
-    if (r && r.length > 20) return r.replace(/\*\*/g, "").replace(/\*/g, "").trim();
-  } catch(e) {}
-  return text;
+// ── Fetch all news ────────────────────────────────────────────────────────────
+async function fetchNews() {
+  const all = [];
+
+  // Try GNews first
+  const gnews = await fetchGNews();
+  gnews.forEach(function(a) { all.push(a); });
+
+  // Try each RSS feed
+  for (let i = 0; i < RSS_FEEDS.length; i++) {
+    try {
+      const items = await fetchRSS(RSS_FEEDS[i]);
+      items.forEach(function(a) { all.push(a); });
+    } catch(e) {}
+  }
+
+  return all;
 }
 
-// ── Headline image ────────────────────────────────────────────────────────────
-function makeHeadlineImage(title, source) {
-  const t = encodeURIComponent(title.substring(0, 80));
-  const s = encodeURIComponent(source || "AIKORA NEWS");
-  return "https://og.tailgraph.com/og?fontFamily=Roboto&title=" + t + "&titleTailwind=text-white+text-4xl+font-bold&text=" + s + "&textTailwind=text-white+text-xl+mt-2&bgTailwind=bg-gray-900&footer=AIKORA+NEWS&footerTailwind=text-gray-400";
+// ── JSONBin DB ────────────────────────────────────────────────────────────────
+async function dbLoad() {
+  if (!JSONBIN_KEY || !JSONBIN_BIN) return new Set();
+  try {
+    const res = await axios.get(
+      "https://api.jsonbin.io/v3/b/" + JSONBIN_BIN + "/latest",
+      { headers: { "X-Master-Key": JSONBIN_KEY }, timeout: 10000 }
+    );
+    const posted = (res.data && res.data.record && res.data.record.posted) || [];
+    console.log("[AutoNews] DB loaded: " + posted.length + " posted titles");
+    return new Set(posted);
+  } catch(e) {
+    console.log("[AutoNews] DB load failed:", e.message);
+    return new Set();
+  }
+}
+
+async function dbSave(postedSet) {
+  if (!JSONBIN_KEY || !JSONBIN_BIN) return;
+  try {
+    await axios.put(
+      "https://api.jsonbin.io/v3/b/" + JSONBIN_BIN,
+      { posted: Array.from(postedSet).slice(-500) },
+      { headers: { "X-Master-Key": JSONBIN_KEY, "Content-Type": "application/json" }, timeout: 10000 }
+    );
+  } catch(e) {
+    console.log("[AutoNews] DB save failed:", e.message);
+  }
+}
+
+// ── Normalize title for comparison ───────────────────────────────────────────
+function normalize(title) {
+  return title.toLowerCase().replace(/[^a-z0-9]/g, "").substring(0, 60);
 }
 
 // ── Post to Facebook Page ─────────────────────────────────────────────────────
-async function postToFacebook(caption, imageUrl, articleUrl) {
-  const pageId    = process.env.PAGE_ID;
-  const feedToken = process.env.PAGE_FEED_TOKEN;
-  if (!pageId || !feedToken) throw new Error("PAGE_ID or PAGE_FEED_TOKEN not set.");
-  const fullCaption = caption + (articleUrl ? "\n\n🔗 Read more: " + articleUrl : "");
-  if (imageUrl) {
-    try {
-      await axios.post("https://graph.facebook.com/v19.0/" + pageId + "/photos",
-        { url: imageUrl, caption: fullCaption, access_token: feedToken }, { timeout: 20000 });
-      return "photo";
-    } catch(e) { console.log("[AutoNews] Photo failed, trying link:", e.message); }
-  }
-  await axios.post("https://graph.facebook.com/v19.0/" + pageId + "/feed",
-    { message: fullCaption, link: articleUrl || undefined, access_token: feedToken }, { timeout: 15000 });
-  return "link";
+async function postToPage(article) {
+  if (!PAGE_TOKEN || !PAGE_ID) throw new Error("PAGE_TOKEN or PAGE_ID not set");
+  await axios.post(
+    "https://graph.facebook.com/v19.0/" + PAGE_ID + "/feed",
+    { message: article.title, link: article.url, access_token: PAGE_TOKEN },
+    { timeout: 15000 }
+  );
 }
 
-// ── Main post ─────────────────────────────────────────────────────────────────
+// ── Global state ──────────────────────────────────────────────────────────────
+if (!global.autoNewsState) {
+  global.autoNewsState = { enabled: false, interval: null, posted: new Set() };
+}
+const state = global.autoNewsState;
+
+// ── Auto post function ────────────────────────────────────────────────────────
 async function autoPost(notifyFn) {
-  if (state.isPosting) { notifyFn("⏳ Still posting, skipping..."); return; }
-  state.isPosting = true;
   try {
-    await initDB();
-    let article = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const articles = await fetchNews();
+    // Reload posted from DB every cycle to stay in sync
+    const dbPosted = await dbLoad();
+    dbPosted.forEach(function(t) { state.posted.add(t); });
+
+    const articles = await fetchNews();
+    let article    = null;
+
+    for (let i = 0; i < articles.length; i++) {
+      const t = articles[i];
+      if (t.title && !state.posted.has(normalize(t.title))) {
+        article = t;
+        break;
+      }
+    }
+
+    if (!article) {
+      // All posted — clear half and retry
+      console.log("[AutoNews] All articles posted, clearing half of history...");
+      const arr = Array.from(state.posted);
+      state.posted = new Set(arr.slice(Math.floor(arr.length / 2)));
+      await dbSave(state.posted);
+
+      // Retry once after clearing
       for (let i = 0; i < articles.length; i++) {
-        if (articles[i].title && !isDuplicate(articles[i].title, state.posted)) {
-          article = articles[i]; break;
+        const t = articles[i];
+        if (t.title && !state.posted.has(normalize(t.title))) {
+          article = t;
+          break;
         }
       }
-      if (article) break;
-      console.log("[AutoNews] All articles posted, trying next category...");
     }
-    if (!article) {
-      // Clear ALL history and retry — news sites don't update that fast
-      console.log("[AutoNews] Clearing full history to find fresh articles...");
-      state.posted.clear();
-      await dbSave(state.posted, state.mode);
 
-      // Try all feeds one more time
-      const modeConfig = NEWS_MODES[state.mode] || NEWS_MODES["philippines"];
-      const allFeeds   = modeConfig.rssFeeds || [];
-      for (let f = 0; f < allFeeds.length && !article; f++) {
-        try {
-          const freshArticles = await fetchRSS(allFeeds[f]);
-          for (let i = 0; i < freshArticles.length; i++) {
-            if (freshArticles[i].title && !isDuplicate(freshArticles[i].title, state.posted)) {
-              article = freshArticles[i]; break;
-            }
-          }
-        } catch(e) {}
-      }
-    }
     if (!article) {
-      console.log("[AutoNews] Truly no new articles. Will retry next cycle.");
-      notifyFn("⏳ No new articles yet. Will check again in 15 minutes.");
+      console.log("[AutoNews] No new articles found.");
+      notifyFn("⏳ No new articles yet. Will try again next cycle.");
       return;
     }
 
-    state.posted.add(normalizeTitle(article.title));
-    state.totalPosted++;
-    state.lastPosted = new Date().toISOString();
-    dbSave(state.posted, state.mode);
+    await postToPage(article);
+    state.posted.add(normalize(article.title));
+    await dbSave(state.posted);
 
-    const source    = (article.source && article.source.name) ? article.source.name : "News";
-    const rawText   = article.title + "\n\n" + (article.description || "");
-    const finalPost = await rewriteWithAI(rawText);
-    const imageUrl  = article.image || article.urlToImage || makeHeadlineImage(article.title, source);
-    const method    = await postToFacebook(finalPost, imageUrl, article.url);
-    notifyFn("✅ [" + (NEWS_MODES[state.mode] ? NEWS_MODES[state.mode].label : state.mode) + "] Posted (" + method + "): " + article.title);
+    console.log("[AutoNews] ✅ Posted: " + article.title.substring(0, 60));
+    notifyFn("✅ Posted: " + article.title.substring(0, 60));
 
-  } catch(err) {
-    notifyFn("❌ Failed: " + err.message);
-  } finally {
-    state.isPosting = false;
+  } catch(e) {
+    console.log("[AutoNews] Error:", e.message);
+    notifyFn("❌ AutoNews error: " + e.message);
   }
 }
 
-// ── Start ─────────────────────────────────────────────────────────────────────
-function startAutoNews() {
-  if (state.interval) return;
-  if (!process.env.PAGE_ID || !process.env.PAGE_FEED_TOKEN) {
-    console.log("[AutoNews] Not started: Missing PAGE_ID or PAGE_FEED_TOKEN.");
-    return;
-  }
-  console.log("[AutoNews] Starting in mode: " + state.mode);
-  setTimeout(function() { autoPost(function(msg) { console.log("[AutoNews]", msg); }); }, 30000);
-  state.interval = setInterval(function() { autoPost(function(msg) { console.log("[AutoNews]", msg); }); }, 15 * 60 * 1000);
+// ── Start auto posting ────────────────────────────────────────────────────────
+async function startAutoNews(notifyFn) {
+  if (state.interval) clearInterval(state.interval);
+
+  // Load posted history from DB on start
+  const dbPosted = await dbLoad();
+  dbPosted.forEach(function(t) { state.posted.add(t); });
+
+  state.enabled  = true;
+  state.interval = setInterval(function() {
+    autoPost(function(msg) { console.log("[AutoNews]", msg); });
+  }, INTERVAL_MS);
+
+  console.log("[AutoNews] Started. Loaded " + state.posted.size + " posted titles.");
+  notifyFn("✅ AutoNews started! Posting every 15 minutes.");
 }
 
-startAutoNews();
+// ── Auto-start on boot ────────────────────────────────────────────────────────
+setTimeout(function() {
+  startAutoNews(function(msg) { console.log("[AutoNews]", msg); });
+  console.log("[AutoNews] Auto-started on boot.");
+}, 5000);
 
 // ── Command ───────────────────────────────────────────────────────────────────
-module.exports.run = async function ({ api, args, event }) {
-  const uid     = event.senderId;
-  const ADMINS  = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
-  const isAdmin = ADMINS.length === 0 || ADMINS.includes(uid);
-  const action  = (args[0] || "status").toLowerCase();
-
-  if (action !== "status" && !isAdmin) return api.send("⛔ Admins only!");
+module.exports.run = async function ({ api, args }) {
+  const action = (args[0] || "status").toLowerCase();
 
   if (action === "status") {
-    const m = NEWS_MODES[state.mode] || NEWS_MODES["philippines"];
     return api.send(
       "📰 AutoNews Status\n━━━━━━━━━━━━━━\n" +
-      "Status: "      + (state.interval ? "🟢 Running" : "🔴 Stopped") + "\n" +
-      "Mode: "        + m.label + "\n" +
-      "Total posted: "+ state.totalPosted + "\n" +
-      "Last posted: " + (state.lastPosted ? new Date(state.lastPosted).toLocaleString() : "Never") + "\n" +
-      "DB: "          + (JSONBIN_BIN ? "✅ JSONBin" : "⚠️ No DB")
+      "Status: "   + (state.enabled ? "🟢 Running" : "🔴 Stopped") + "\n" +
+      "Posted: "   + state.posted.size + " articles\n" +
+      "Interval: 15 minutes\n" +
+      "Source: Philippines (GNews + RSS)"
     );
   }
 
-  if (action === "mode") {
-    const newMode = args[1] ? args[1].toLowerCase() : null;
-
-    // Show available modes if no argument
-    if (!newMode || !NEWS_MODES[newMode]) {
-      const modeList = Object.keys(NEWS_MODES).map(function(k) {
-        return (k === state.mode ? "✅ " : "   ") + "!" + "autonews mode " + k + " — " + NEWS_MODES[k].label;
-      }).join("\n");
-      return api.send("📰 Available News Modes:\n━━━━━━━━━━━━━━\n" + modeList + "\n\nCurrent: " + (NEWS_MODES[state.mode] ? NEWS_MODES[state.mode].label : state.mode));
-    }
-
-    state.mode          = newMode;
-    state.categoryIndex = 0;
-    state.posted.clear(); // clear history when switching mode
-    await dbSave(state.posted, state.mode);
-    return api.send("✅ News mode changed to: " + NEWS_MODES[newMode].label + "\n\nHistory cleared. Next post will use new mode!");
-  }
-
   if (action === "test") {
-    api.send("🧪 Posting now in mode: " + (NEWS_MODES[state.mode] ? NEWS_MODES[state.mode].label : state.mode) + "...");
+    api.send("🧪 Testing AutoNews...");
     await autoPost(function(msg) { api.send(msg); });
     return;
   }
 
-  if (action === "reset") {
-    const c = state.posted.size;
-    state.posted.clear();
-    await dbSave(state.posted, state.mode);
-    return api.send("🔄 Cleared " + c + " titles. Fresh start!");
-  }
-
   if (action === "on") {
-    if (state.interval) return api.send("Already running!");
-    startAutoNews();
-    return api.send("✅ AutoNews started!");
+    await startAutoNews(function(msg) { api.send(msg); });
+    return;
   }
 
   if (action === "off") {
-    if (!state.interval) return api.send("Already stopped!");
-    clearInterval(state.interval);
-    state.interval = null;
+    if (state.interval) clearInterval(state.interval);
+    state.enabled = false;
     return api.send("🔴 AutoNews stopped.");
+  }
+
+  if (action === "reset") {
+    state.posted.clear();
+    await dbSave(state.posted);
+    return api.send("🔄 History cleared! Will repost fresh articles next cycle.");
   }
 
   api.send(
     "📰 AutoNews Commands\n━━━━━━━━━━━━━━\n" +
-    "!autonews status       — Check status\n" +
-    "!autonews mode         — Show all modes\n" +
-    "!autonews mode philippines — 🇵🇭 PH news\n" +
-    "!autonews mode world   — 🌍 World news\n" +
-    "!autonews mode technology — 💻 Tech news\n" +
-    "!autonews mode sports  — ⚽ Sports news\n" +
-    "!autonews mode entertainment — 🎬 Showbiz\n" +
-    "!autonews mode business — 💼 Business\n" +
-    "!autonews mode mixed   — 🔀 All topics\n" +
-    "!autonews test         — Post now\n" +
-    "!autonews reset        — Clear history\n" +
-    "!autonews on/off       — Start/Stop"
+    "!autonews status — Check status\n" +
+    "!autonews test   — Post now\n" +
+    "!autonews on     — Start\n" +
+    "!autonews off    — Stop\n" +
+    "!autonews reset  — Clear history"
   );
 };
