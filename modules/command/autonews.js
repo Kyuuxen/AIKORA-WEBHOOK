@@ -111,6 +111,43 @@ async function fetchNews() {
   return all;
 }
 
+// ── Rewrite article via Gemini ────────────────────────────────────────────────
+async function rewriteWithClaude(title) {
+  try {
+    const prompt = [
+      "Rewrite this news headline into a professional, engaging English Facebook post.",
+      "Make it informative and polished. Add 1-2 relevant emojis.",
+      "Keep it under 200 characters. End with a call to action like 'What are your thoughts?' or 'Share this with others!'",
+      "Only return the rewritten post, nothing else. No hashtags.",
+      "",
+      "News title: " + title,
+    ].join("\n");
+
+    const res = await axios.post(
+      "https://text.pollinations.ai/",
+      {
+        messages: [
+          { role: "system", content: "You are a professional news editor. Only return the rewritten Facebook post, nothing else." },
+          { role: "user",   content: prompt },
+        ],
+        model: "openai",
+        seed:  Math.floor(Math.random() * 9999),
+      },
+      { headers: { "Content-Type": "application/json" }, timeout: 20000 }
+    );
+
+    const text = typeof res.data === "string" ? res.data.trim() : null;
+    if (text && text.length > 5) {
+      console.log("[AutoNews] Pollinations rewrite OK");
+      return text;
+    }
+    return title;
+  } catch(e) {
+    console.log("[AutoNews] Pollinations rewrite failed:", e.message);
+    return title;
+  }
+}
+
 // ── JSONBin DB ────────────────────────────────────────────────────────────────
 async function dbLoad() {
   if (!JSONBIN_KEY || !JSONBIN_BIN) return new Set();
@@ -149,9 +186,13 @@ function normalize(title) {
 // ── Post to Facebook Page ─────────────────────────────────────────────────────
 async function postToPage(article) {
   if (!PAGE_TOKEN || !PAGE_ID) throw new Error("PAGE_TOKEN or PAGE_ID not set");
+
+  // Rewrite title into engaging caption using Gemini
+  const caption = await rewriteWithClaude(article.title);
+
   await axios.post(
     "https://graph.facebook.com/v19.0/" + PAGE_ID + "/feed",
-    { message: article.title, link: article.url, access_token: PAGE_TOKEN },
+    { message: caption + "\n\n🔗 " + article.url, link: article.url, access_token: PAGE_TOKEN },
     { timeout: 15000 }
   );
 }
@@ -210,7 +251,9 @@ async function autoPost(notifyFn) {
       return;
     }
 
-    await postToPage(article);
+    // Rewrite title with Gemini before posting
+    const caption = await rewriteWithClaude(article.title);
+    await postToPage({ title: caption, url: article.url });
     state.posted.add(normalize(article.title));
     await dbSave(state.posted);
 
