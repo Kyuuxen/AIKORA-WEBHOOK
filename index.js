@@ -4,6 +4,7 @@ const express    = require("express");
 const bodyParser = require("body-parser");
 const axios      = require("axios");
 const security   = require("./utils/security");
+const aiBrain    = require("./utils/aiBrain");
 const fs         = require("fs");
 const path       = require("path");
 
@@ -273,11 +274,23 @@ async function handleCommand(senderId, text) {
 // Handle AI
 async function handleAI(senderId, text) {
   logger.log("AI from " + senderId + ": " + text, "AI");
-  addMemory(senderId, "user", text);
-  const reply = await askAI(senderId, text);
-  if (!reply) { await sendMessage(senderId, "Sandali lang, ulit ka mag-message! 😊"); return; }
-  addMemory(senderId, "bot", reply);
-  await sendMessage(senderId, reply);
+  try {
+    // Use aiBrain — conversational, learns every minute
+    const reply = await aiBrain.chat(senderId, text);
+    if (reply) {
+      addMemory(senderId, "user", text);
+      addMemory(senderId, "bot", reply);
+      return sendMessage(senderId, reply);
+    }
+  } catch(e) {
+    logger.log("aiBrain failed: " + e.message, "WARN");
+    // Fallback to old askAI
+    const reply = await askAI(senderId, text);
+    if (!reply) { await sendMessage(senderId, "Sandali lang, ulit ka mag-message! 😊"); return; }
+    addMemory(senderId, "user", text);
+    addMemory(senderId, "bot", reply);
+    await sendMessage(senderId, reply);
+  }
 }
 
 // Handle message router
