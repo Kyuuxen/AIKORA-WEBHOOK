@@ -3,6 +3,7 @@
 const express    = require("express");
 const bodyParser = require("body-parser");
 const axios      = require("axios");
+const security   = require("./utils/security");
 const fs         = require("fs");
 const path       = require("path");
 
@@ -283,6 +284,14 @@ async function handleAI(senderId, text) {
 async function handleMessage(senderId, text) {
   if (!text) return;
   await markSeen(senderId);
+
+  // ── Security check (self-learning) ─────────────────────────────────────────
+  const secResult = await security.check(senderId, text, function(msg) {
+    return sendMessage(senderId, msg);
+  });
+  if (!secResult.safe) return; // blocked by security
+  // ───────────────────────────────────────────────────────────────────────────
+
   await showTyping(senderId);
 
   if (text.startsWith(PREFIX)) {
