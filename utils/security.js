@@ -87,9 +87,11 @@ async function loadBrain() {
     if (data.learnedPatterns) {
       brain.learnedPatterns = data.learnedPatterns;
     }
-    // Restore bans
+    // Restore bans (skip admin bans)
+    const _adminIds = (process.env.ADMIN_IDS || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
     if (data.banned) {
       data.banned.forEach(function(b) {
+        if (_adminIds.includes(b.uid)) return; // never restore admin bans
         if (!b.expires || b.expires > Date.now()) {
           brain.banned.set(b.uid, b);
         }
