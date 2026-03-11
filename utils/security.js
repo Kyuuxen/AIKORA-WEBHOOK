@@ -110,6 +110,17 @@ async function loadBrain() {
     // Restore stats
     if (data.stats) brain.stats = Object.assign(brain.stats, data.stats);
 
+    // Auto-unban any admin who got accidentally banned
+    const adminIds = (process.env.ADMIN_IDS || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
+    adminIds.forEach(function(aid) {
+      if (brain.banned.has(aid)) {
+        brain.banned.delete(aid);
+        brain.warnings.delete(aid);
+        brain.threatScores.delete(aid);
+        console.log("[Security] Auto-unbanned admin: " + aid);
+      }
+    });
+
     brain.lastLoad = Date.now();
     console.log("[Security] Brain loaded — " + brain.learnedPatterns.length + " learned patterns, " + brain.banned.size + " bans");
   } catch(e) {
@@ -337,6 +348,10 @@ async function check(uid, text, sendFn) {
   if (!text || !uid) return { safe: true };
   brain.stats.totalAnalyzed++;
 
+  // Admins are ALWAYS safe — never check or ban them
+  const admins = (process.env.ADMIN_IDS || "").split(",").map(function(id) { return id.trim(); }).filter(Boolean);
+  if (admins.includes(uid)) return { safe: true };
+
   await loadBrain();
 
   // Check ban first
@@ -416,6 +431,16 @@ module.exports = {
   brain,
   saveBrain,
   loadBrain,
+
+  // Emergency self-unban — works even if banned
+  selfUnban: function(uid) {
+    brain.banned.delete(uid);
+    brain.warnings.delete(uid);
+    brain.threatScores.delete(uid);
+    brain.muted.delete(uid);
+    saveBrain();
+    console.log("[Security] Self-unban: " + uid);
+  },
 
   // Admin: manually ban a user
   ban: function(uid, reason, hours) {
