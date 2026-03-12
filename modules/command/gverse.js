@@ -8,35 +8,39 @@ module.exports.config = {
 };
 
 module.exports.run = async function ({ api, args, event }) {
-  const senderId = event.senderId;
   const input = args.join(" ").trim();
+  if (!input) {
+    return api.send("Usage: !gverse [your query]");
+  }
 
-  if (!input) return api.send("Usage: !gverse [your query]");
-
-  const sanitized = encodeURIComponent(input.replace(/\s+/g, "_"));
-  const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${sanitized}`;
+  const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(
+    input
+  )}`;
 
   try {
-    const res = await axios.get(url, { timeout: 8000 });
-    const data = res.data;
+    const { data } = await axios.get(url, { timeout: 8000 });
 
-    if (!data.title || !data.description) {
-      return api.send(`❌ I couldn't find any gnostic verses for "${input}". Try a different query.`);
+    const title = data?.title;
+    const description = data?.description || data?.extract;
+    const extract = data?.extract || "No summary available.";
+    const pageUrl = data?.content_urls?.desktop?.page || "";
+
+    if (!title || !description) {
+      return api.send(
+        `❌ I couldn't find any gnostic verses for "${input}". Try a different query.`
+      );
     }
-
-    const title = data.title;
-    const description = data.description;
-    const extract = data.extract || "No summary available.";
-    const pageUrl = data.content_urls.desktop.page || data.content_urls.desktop.page || "";
 
     const message = `🕊️ *${title}*\n\n*${description}*\n\n${extract}\n\n📖 ${pageUrl}`;
 
-    api.send(message);
+    return api.send(message);
   } catch (err) {
     if (err.response && err.response.status === 404) {
-      api.send(`❌ No gnostic verses found for "${input}". Try another query.`);
+      return api.send(
+        `❌ No gnostic verses found for "${input}". Try another query.`
+      );
     } else {
-      api.send("❌ Something went wrong. Please try again.");
+      return api.send("❌ Something went wrong. Please try again.");
     }
   }
 };
