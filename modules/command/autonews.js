@@ -114,20 +114,18 @@ async function fetchNews() {
 // ── Rewrite article via Gemini ────────────────────────────────────────────────
 async function rewriteWithClaude(title) {
   try {
-    const prompt = [
-      "Rewrite this news headline into a professional, engaging English Facebook post.",
-      "Make it informative and polished. Add 1-2 relevant emojis.",
-      "Keep it under 200 characters. End with a call to action like 'What are your thoughts?' or 'Share this with others!'",
-      "Only return the rewritten post, nothing else. No hashtags.",
-      "",
-      "News title: " + title,
-    ].join("\n");
+    // Use simple GET request — more reliable than POST for short prompts
+    const prompt =
+      "Rewrite this news headline into a professional engaging English Facebook post. " +
+      "Add 1-2 emojis. Under 200 characters. End with 'What are your thoughts?' " +
+      "Return ONLY the post text, no HTML, no code, no explanation. " +
+      "Headline: " + title;
 
     const res = await axios.post(
       "https://text.pollinations.ai/",
       {
         messages: [
-          { role: "system", content: "You are a professional news editor. Only return the rewritten Facebook post, nothing else." },
+          { role: "system", content: "You are a Facebook page manager. Return ONLY the post text. Never return HTML, code, or markdown. Just plain text." },
           { role: "user",   content: prompt },
         ],
         model: "openai",
@@ -136,14 +134,32 @@ async function rewriteWithClaude(title) {
       { headers: { "Content-Type": "application/json" }, timeout: 20000 }
     );
 
-    const text = typeof res.data === "string" ? res.data.trim() : null;
-    if (text && text.length > 5) {
-      console.log("[AutoNews] Pollinations rewrite OK");
+    let text = typeof res.data === "string" ? res.data.trim() : null;
+    if (!text) return title;
+
+    // Validate — reject if response looks like HTML or code
+    if (
+      text.includes("<!doctype") ||
+      text.includes("<html") ||
+      text.includes("<head") ||
+      text.includes("<body") ||
+      text.includes("```") ||
+      text.length > 500
+    ) {
+      console.log("[AutoNews] Bad response from Pollinations, using original title");
+      return title;
+    }
+
+    // Clean up any stray quotes or newlines
+    text = text.split("\n").join(" ").split("\r").join(" ").trim();
+
+    if (text.length > 5) {
+      console.log("[AutoNews] Rewrite OK: " + text.substring(0, 60));
       return text;
     }
     return title;
   } catch(e) {
-    console.log("[AutoNews] Pollinations rewrite failed:", e.message);
+    console.log("[AutoNews] Rewrite failed:", e.message);
     return title;
   }
 }
